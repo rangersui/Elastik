@@ -31,8 +31,12 @@ init_audit_db()
 init_stage_db()
 
 # ── Load SERVER_INSTRUCTIONS ──────────────────────────────────────────────
+from pipeline.config import PERSONAL_MODE
 from pipeline.prompts import load as _load_prompt
-SERVER_INSTRUCTIONS = _load_prompt("server_instructions.md")
+SERVER_INSTRUCTIONS = _load_prompt(
+    "server_instructions.md",
+    mode="personal" if PERSONAL_MODE else "enterprise",
+)
 
 mcp = FastMCP(
     "FrictionDeck",
@@ -121,6 +125,21 @@ def get_audit_trail(
     """Get audit log entries. Filter by event_type if needed."""
     from pipeline.mcp_adapter import get_audit_trail as _get
     return _json(_get(limit=limit, offset=offset, event_type=event_type or None))
+
+
+@mcp.tool()
+def get_proxy_whitelist() -> str:
+    """List whitelisted proxy services that Stage JS can fetch via /proxy/<service>/.
+
+    Returns service names and their target base URLs.
+    Personal mode only — enterprise mode has no proxy access from Stage.
+    """
+    from pipeline.config import PROXY_WHITELIST, PERSONAL_MODE
+    return _json({
+        "mode": "personal" if PERSONAL_MODE else "enterprise",
+        "services": {k: v for k, v in PROXY_WHITELIST.items()},
+        "usage": "fetch('/proxy/<service>/<path>')",
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════

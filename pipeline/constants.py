@@ -30,6 +30,9 @@ class EventType:
     PARAM_LOCKED = "param_locked"
     PARAM_UNLOCKED = "param_unlocked"
 
+    # Proxy
+    PROXY_FORWARDED = "proxy_forwarded"
+
     # Negative space
     NEGATIVE_SPACE_FLAGGED = "negative_space_flagged"
 

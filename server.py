@@ -10,12 +10,13 @@ FastAPI serves everything. Zero Redis. Zero microservices.
 """
 
 import logging
+import httpx
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from pipeline.config import PORT, VERSION, setup_logging
+from pipeline.config import PORT, VERSION, PROXY_WHITELIST, setup_logging
 from pipeline.broadcast import broadcast, subscribe, unsubscribe
 from pipeline.stage import set_broadcast, init_stage_db
 from pipeline.audit import init_audit_db
@@ -31,6 +32,27 @@ app = FastAPI(
     description="Engineering judgment infrastructure.",
     docs_url="/docs",
 )
+
+
+# ── CSP middleware ────────────────────────────────────────────────────────
+
+CSP = (
+    "default-src 'self'; "
+    "script-src 'unsafe-inline'; "
+    "connect-src 'self'; "
+    "frame-src 'self'; "
+    "img-src * data:; "
+    "style-src 'unsafe-inline' *; "
+    "font-src *"
+)
+
+
+@app.middleware("http")
+async def add_csp_header(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in ("/", "/index.html"):
+        response.headers["Content-Security-Policy"] = CSP
+    return response
 
 
 # ── Startup ──────────────────────────────────────────────────────────────
@@ -224,6 +246,59 @@ async def api_approve_commit(proposal_id: str, engineer: str = "ranger"):
 async def api_reject_commit(proposal_id: str, reason: str):
     from pipeline.gui_adapter import reject_commit
     return reject_commit(proposal_id, reason)
+
+
+# ── Proxy layer ──────────────────────────────────────────────────────────
+
+@app.api_route("/proxy/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy(service: str, path: str, request: Request):
+    """Forward request to whitelisted service. Audit logged."""
+    from pipeline.audit import log_event
+    from pipeline.constants import EventType
+
+    base_url = PROXY_WHITELIST.get(service)
+    if not base_url:
+        return Response(
+            content=f'{{"error":"service not whitelisted: {service}"}}',
+            status_code=403,
+            media_type="application/json",
+        )
+
+    target = f"{base_url}/{path}"
+    if request.url.query:
+        target += f"?{request.url.query}"
+
+    body = await request.body()
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length", "transfer-encoding")
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.request(
+            method=request.method,
+            url=target,
+            headers=headers,
+            content=body if body else None,
+        )
+
+    log_event(
+        EventType.PROXY_FORWARDED,
+        actor="iframe",
+        pathway="proxy",
+        payload={
+            "service": service,
+            "path": f"/{path}",
+            "method": request.method,
+            "status_code": resp.status_code,
+        },
+    )
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/json"),
+    )
 
 
 # ── Static files (must be last — catch-all) ──────────────────────────────

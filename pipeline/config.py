@@ -23,6 +23,25 @@ VERSION = "4.0.0-alpha"
 PORT = int(os.environ.get("FRICTIONDECK_PORT", "3004"))
 PERSONAL_MODE = os.environ.get("FRICTIONDECK_MODE", "personal") == "personal"
 
+# ── iframe sandbox ────────────────────────────────────────────────────────
+# personal: allow-same-origin lets iframe fetch /proxy/*
+# enterprise: remove allow-same-origin, AI uses MCP for data
+IFRAME_SANDBOX = (
+    "allow-scripts allow-same-origin allow-popups"
+    if PERSONAL_MODE
+    else "allow-scripts allow-popups"
+)
+
+# ── Proxy whitelist ───────────────────────────────────────────────────────
+# iframe JS can fetch('/proxy/<service>/...') → forwarded to target URL
+# Only whitelisted services are allowed. Everything else → 403.
+PROXY_WHITELIST: dict[str, str] = {
+    "anthropic": "https://api.anthropic.com",
+    "weather": "https://api.openweathermap.org",
+    # Add your own:
+    # "stocks": "https://api.example.com",
+}
+
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
