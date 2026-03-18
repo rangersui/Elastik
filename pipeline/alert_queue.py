@@ -36,7 +36,7 @@ def push_alert(alert_type: str, message: str, data: dict | None = None) -> None:
 
 
 def drain_alerts() -> list[dict]:
-    """Pop all pending alerts. Called by _attach_alerts() wrapper in mcp_adapter."""
+    """Pop all pending alerts. Called by _attach_alerts()."""
     alerts = list(_alerts)
     _alerts.clear()
     return alerts
@@ -45,15 +45,14 @@ def drain_alerts() -> list[dict]:
 def record_tool_call(tool_name: str) -> None:
     """Track tool calls for nagging mechanism.
 
-    If 5+ calls pass without a drop_artifact or promote_to_judgment,
-    push a nagging alert.
+    If 5+ calls pass without externalizing, push a nagging alert.
     """
     global _tool_calls_since_last_drop
 
     # Reset counter on content-producing tools
     _RESET_TOOLS = {
-        "drop_artifact", "drop_note", "promote_to_judgment",
-        "promote_to_claim", "flag_negative_space", "propose_commit",
+        "mutate_stage", "append_stage", "execute_js",
+        "promote_to_judgment", "flag_negative_space", "propose_commit",
     }
 
     if tool_name in _RESET_TOOLS:
@@ -66,19 +65,15 @@ def record_tool_call(tool_name: str) -> None:
         push_alert(
             "nagging",
             f"No findings externalized in last {_tool_calls_since_last_drop} tool calls. "
-            "Consider using drop_artifact or promote_to_judgment to record your analysis.",
+            "Consider using mutate_stage/append_stage or promote_to_judgment.",
         )
 
 
 def _attach_alerts(result: dict) -> dict:
     """Attach pending alerts to any MCP tool return value.
 
-    This is the core piggyback mechanism. Every MCP tool return gets
-    pending_alerts injected, so the AI sees the latest state as long
-    as it keeps calling tools.
-
-    Usage in mcp_adapter.py:
-        return _attach_alerts({"status": "ok", "version": 42})
+    Core piggyback mechanism. Every MCP tool return gets
+    pending_alerts injected.
     """
     alerts = drain_alerts()
     result["pending_alerts"] = alerts

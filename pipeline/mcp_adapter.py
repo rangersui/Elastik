@@ -1,45 +1,27 @@
 """FrictionDeck v4 — MCP Adapter (AI's hands)
 
-All operations an AI can perform through MCP. Physical isolation from gui_adapter.
-CI scans enforce: zero intersection between mcp_adapter and gui_adapter function sets.
-
-Two categories:
-  Content (free):     drop_artifact, drop_note, attach_evidence
-  Constraint (controlled): verify_claim, promote_to_judgment, flag_negative_space,
-                           propose_commit, attach_relation, update_parameter
-
-Every function returns a dict. mcp_server.py does json.dumps.
+Physical isolation from gui_adapter. CI enforces zero intersection.
 Every return value gets pending_alerts attached via _attach_alerts().
 """
 
 import logging
-from typing import Any
 
 from pipeline.alert_queue import _attach_alerts, record_tool_call
-from pipeline.constants import ArtifactState, EventType, OverlayType, SourceTrust, Verdict
+from pipeline.constants import EventType, JudgmentState
 from pipeline.stage import (
-    add_overlay,
-    add_relation,
-    get_artifacts,
+    get_html,
     get_judgments,
-    get_overlays,
-    get_relations,
     get_stage_diff,
     get_stage_state,
     get_version,
     promote_to_judgment,
-    update_artifact,
-    update_judgment_nli,
-    write_artifact,
+    set_html,
 )
 
 logger = logging.getLogger("frictiondeck.mcp_adapter")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# T1 — READ (any agent can call)
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ── T1 — READ ────────────────────────────────────────────────────────────
 
 def get_world_state() -> dict:
     """Return complete world state for AI context recovery."""
@@ -56,45 +38,26 @@ def mcp_get_stage_state() -> dict:
     return _attach_alerts(get_stage_state())
 
 
-def wait_for_stage_update(last_known_version: int) -> dict:
-    """Return changes since last_known_version.
+def mcp_get_stage_html() -> dict:
+    """Return current stage HTML (full DOM)."""
+    record_tool_call("get_stage_html")
+    return _attach_alerts({"html": get_html(), "version": get_version()})
 
-    If version hasn't changed, returns {changed: false}.
-    AI polls this to detect human actions on the GUI.
-    """
+
+def mcp_get_stage_summary() -> dict:
+    """Return structured summary of stage (judgments + version, no HTML)."""
+    record_tool_call("get_stage_summary")
+    return _attach_alerts({
+        "version": get_version(),
+        "judgments": get_judgments(),
+        "judgment_count": len(get_judgments()),
+    })
+
+
+def wait_for_stage_update(last_known_version: int) -> dict:
+    """Return changes since last_known_version."""
     record_tool_call("wait_for_stage_update")
     return _attach_alerts(get_stage_diff(last_known_version))
-
-
-def search_chunks(query: str, limit: int = 20) -> dict:
-    """Search artifacts and judgments by text content.
-
-    Uses simple LIKE matching. Phase 1 will add FTS5.
-    """
-    record_tool_call("search_chunks")
-    from pipeline.stage import _get_conn
-
-    conn = _get_conn()
-    pattern = f"%{query}%"
-
-    # Search artifacts
-    artifacts = conn.execute(
-        "SELECT * FROM artifacts WHERE deleted = 0 AND content LIKE ? LIMIT ?",
-        (pattern, limit),
-    ).fetchall()
-
-    # Search judgments
-    judgments = conn.execute(
-        "SELECT * FROM judgment_objects WHERE claim_text LIKE ? LIMIT ?",
-        (pattern, limit),
-    ).fetchall()
-
-    return _attach_alerts({
-        "query": query,
-        "artifacts": [dict(r) for r in artifacts],
-        "judgments": [dict(r) for r in judgments],
-        "total": len(artifacts) + len(judgments),
-    })
 
 
 def search_commits(
@@ -106,9 +69,8 @@ def search_commits(
     """Search committed judgments (solid state)."""
     record_tool_call("search_commits")
 
-    judgments = get_judgments(state=ArtifactState.SOLID)
+    judgments = get_judgments(state=JudgmentState.SOLID)
 
-    # Basic filtering
     results = judgments
     if query:
         q = query.lower()
@@ -125,106 +87,123 @@ def search_commits(
     })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# T2 — SPECULATE (agent + logged)
-# Content tools: free, AI drops whatever it wants
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def drop_artifact(
-    content: str,
-    content_type: str = "html",
-    metadata: dict | None = None,
-    source_trust: str = "grey",
+def get_audit_trail(
+    limit: int = 50,
+    offset: int = 0,
+    event_type: str | None = None,
 ) -> dict:
-    """Drop an artifact onto the Stage (fluid state).
+    """Return audit log entries."""
+    record_tool_call("get_audit_trail")
+    from pipeline.audit import get_audit_log
+    return _attach_alerts({
+        "events": get_audit_log(limit=limit, offset=offset, event_type=event_type),
+    })
 
-    content_type: "html", "markdown", "svg", "text", "jsx"
-    source_trust: "green" (has original), "yellow" (external), "grey" (AI assertion)
+
+# ── T2 — DOM operations ──────────────────────────────────────────────────
+
+def mutate_stage(selector: str, new_html: str) -> dict:
+    """Full replacement of stage HTML. Selector is logged for audit only.
+
+    AI owns the HTML — pass the complete new version.
     """
-    record_tool_call("drop_artifact")
+    record_tool_call("mutate_stage")
     from pipeline.audit import log_event
 
-    result = write_artifact(
-        content=content,
-        content_type=content_type,
-        metadata=metadata,
-        source_trust=source_trust,
-        created_by="ai",
-    )
+    result = set_html(new_html)
 
     log_event(
-        EventType.ARTIFACT_DROPPED,
+        EventType.STAGE_MUTATED,
         actor="ai",
         pathway="mcp",
-        payload={"artifact_id": result["artifact_id"], "content_type": content_type},
+        payload={"selector": selector, "html_length": len(new_html)},
     )
 
-    return _attach_alerts(result)
+    return _attach_alerts({
+        "action": "mutate",
+        "selector": selector,
+        "version": result["version"],
+    })
 
 
-def drop_note(text: str, metadata: dict | None = None) -> dict:
-    """Shortcut: drop a text note (plain text artifact)."""
-    record_tool_call("drop_note")
-    return drop_artifact(content=text, content_type="text", metadata=metadata)
+def append_stage(parent_selector: str, html: str) -> dict:
+    """Append html to current stage HTML (concatenation).
 
-
-def attach_evidence(
-    artifact_id: str,
-    evidence_text: str,
-    source: str | None = None,
-) -> dict:
-    """Attach evidence to an existing artifact."""
-    record_tool_call("attach_evidence")
+    parent_selector is logged for audit only — actual operation is
+    string append to the end of stage_html. AI owns the structure.
+    """
+    record_tool_call("append_stage")
     from pipeline.audit import log_event
 
-    current_meta = {}
-    artifacts = get_artifacts()
-    for a in artifacts:
-        if a["artifact_id"] == artifact_id:
-            import json
-            current_meta = json.loads(a.get("metadata", "{}"))
-            break
-
-    evidence_list = current_meta.get("evidence", [])
-    evidence_list.append({"text": evidence_text, "source": source})
-    current_meta["evidence"] = evidence_list
-
-    # Upgrade trust if source is provided
-    source_trust = SourceTrust.YELLOW if source else SourceTrust.GREY
-
-    result = update_artifact(artifact_id, metadata=current_meta)
+    current = get_html()
+    result = set_html(current + html)
 
     log_event(
-        EventType.ARTIFACT_UPDATED,
+        EventType.STAGE_APPENDED,
         actor="ai",
         pathway="mcp",
-        payload={"artifact_id": artifact_id, "evidence_source": source},
+        payload={"parent_selector": parent_selector, "html_length": len(html)},
     )
 
-    return _attach_alerts(result)
+    return _attach_alerts({
+        "action": "append",
+        "parent_selector": parent_selector,
+        "version": result["version"],
+    })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# T2 — Constraint tools: controlled, state-changing
-# ═══════════════════════════════════════════════════════════════════════════
 
+def query_stage(selector: str) -> dict:
+    """Return full stage HTML. AI finds what it needs in context.
+
+    Selector is logged for audit/intent. Returns entire stage_html —
+    AI generated it, AI knows the structure.
+    """
+    record_tool_call("query_stage")
+    return _attach_alerts({
+        "html": get_html(),
+        "selector": selector,
+        "version": get_version(),
+    })
+
+
+def execute_js(script: str) -> dict:
+    """Execute JavaScript on the Stage page via WebSocket broadcast.
+
+    Does NOT modify stage_html — JS is runtime-only, not persisted.
+    Browser receives the script via WebSocket and evals it.
+    """
+    record_tool_call("execute_js")
+    from pipeline.audit import log_event
+    from pipeline.stage import broadcast_event
+
+    log_event(
+        EventType.STAGE_JS_EXECUTED,
+        actor="ai",
+        pathway="mcp",
+        payload={"script_length": len(script)},
+    )
+
+    # Push to browser via WebSocket — runtime only, not persisted
+    broadcast_event("execute_js", {"script": script})
+
+    return _attach_alerts({
+        "action": "execute_js",
+        "version": get_version(),
+    })
+
+
+# ── T2 — Constraint tools ────────────────────────────────────────────────
 
 def mcp_promote_to_judgment(
-    artifact_id: str,
     claim_text: str,
     params: list[dict] | None = None,
 ) -> dict:
-    """Promote an artifact to a judgment object (fluid → viscous).
-
-    This is a significant action — the judgment object enters the audit layer
-    and can eventually be committed + HMAC sealed.
-    """
+    """Promote a claim to a judgment object (viscous state)."""
     record_tool_call("promote_to_judgment")
     from pipeline.audit import log_event
 
     result = promote_to_judgment(
-        artifact_id=artifact_id,
         claim_text=claim_text,
         params=params,
         created_by="ai",
@@ -236,7 +215,6 @@ def mcp_promote_to_judgment(
         pathway="mcp",
         payload={
             "judgment_id": result["judgment_id"],
-            "artifact_id": artifact_id,
             "claim_text": claim_text[:200],
         },
     )
@@ -244,218 +222,38 @@ def mcp_promote_to_judgment(
     return _attach_alerts(result)
 
 
-def verify_claim(
-    judgment_id: str,
-    evidence_text: str | None = None,
-) -> dict:
-    """Run NLI verification on a judgment object.
-
-    Uses DeBERTa (encoder verifies decoder — architectural independence).
-    """
-    record_tool_call("verify_claim")
-    from pipeline.audit import log_event
-
-    # Get the judgment's claim text
-    judgments = get_judgments()
-    target = None
-    for j in judgments:
-        if j["judgment_id"] == judgment_id:
-            target = j
-            break
-
-    if not target:
-        return _attach_alerts({"error": f"judgment not found: {judgment_id}"})
-
-    # TODO Phase 1: call pipeline.nli with DeBERTa
-    # For now, return neutral (DeBERTa not yet integrated in v4)
-    verdict = Verdict.NEUTRAL
-    confidence = 0.5
-
-    result = update_judgment_nli(judgment_id, verdict, confidence)
-
-    log_event(
-        EventType.NLI_VERIFIED,
-        actor="ai",
-        pathway="mcp",
-        payload={
-            "judgment_id": judgment_id,
-            "verdict": verdict,
-            "confidence": confidence,
-        },
-    )
-
-    result["verdict"] = verdict
-    result["confidence"] = confidence
-    return _attach_alerts(result)
-
-
-def flag_negative_space(description: str, related_ids: list[str] | None = None) -> dict:
-    """Flag something that's MISSING from the analysis.
-
-    Only AI can flag. Only human can dismiss.
-    """
+def flag_negative_space(description: str, severity: str = "medium") -> dict:
+    """Flag something MISSING. Only AI can flag, only human can dismiss."""
     record_tool_call("flag_negative_space")
     from pipeline.audit import log_event
-
-    # Create an artifact for the negative space flag
-    artifact_result = write_artifact(
-        content=f"⚠️ NEGATIVE SPACE: {description}",
-        content_type="text",
-        metadata={"type": "negative_space", "related_ids": related_ids or []},
-        source_trust=SourceTrust.GREY,
-        created_by="ai",
-    )
-
-    # Add negative_space overlay
-    add_overlay(
-        target_id=artifact_result["artifact_id"],
-        target_type="artifact",
-        overlay_type=OverlayType.NEGATIVE_SPACE,
-        value={"description": description, "related_ids": related_ids or []},
-        created_by="ai",
-    )
 
     log_event(
         EventType.NEGATIVE_SPACE_FLAGGED,
         actor="ai",
         pathway="mcp",
-        payload={
-            "artifact_id": artifact_result["artifact_id"],
-            "description": description[:200],
-        },
+        payload={"description": description[:200], "severity": severity},
     )
 
-    return _attach_alerts(artifact_result)
+    return _attach_alerts({
+        "status": "flagged",
+        "description": description,
+        "severity": severity,
+        "version": get_version(),
+    })
 
 
-def mcp_attach_relation(
-    from_id: str,
-    to_id: str,
-    relation_type: str = "depends_on",
-    label: str | None = None,
-) -> dict:
-    """Create a relation between two cards."""
-    record_tool_call("attach_relation")
-    from pipeline.audit import log_event
+# ── T3 — PROPOSE ─────────────────────────────────────────────────────────
 
-    result = add_relation(
-        from_id=from_id,
-        to_id=to_id,
-        relation_type=relation_type,
-        label=label,
-        created_by="ai",
-    )
-
-    log_event(
-        EventType.RELATION_ADDED,
-        actor="ai",
-        pathway="mcp",
-        payload={
-            "relation_id": result["relation_id"],
-            "from_id": from_id,
-            "to_id": to_id,
-            "type": relation_type,
-        },
-    )
-
-    return _attach_alerts(result)
-
-
-def update_parameter(
-    judgment_id: str,
-    param_name: str,
-    new_value: Any,
-) -> dict:
-    """Update a parameter on a judgment object (if not locked)."""
-    record_tool_call("update_parameter")
-    import json
-    from pipeline.audit import log_event
-    from pipeline.stage import _get_conn
-
-    conn = _get_conn()
-
-    # Check if parameter is locked
-    overlays = get_overlays(target_id=judgment_id)
-    for o in overlays:
-        import json as _json
-        val = _json.loads(o.get("value", "{}"))
-        if o["overlay_type"] == OverlayType.LOCK and val.get("param_name") == param_name:
-            return _attach_alerts({
-                "error": f"Parameter '{param_name}' is locked. Only humans can unlock.",
-                "locked": True,
-            })
-
-    # Get current params
-    row = conn.execute(
-        "SELECT params FROM judgment_objects WHERE judgment_id = ?",
-        (judgment_id,),
-    ).fetchone()
-    if not row:
-        return _attach_alerts({"error": f"judgment not found: {judgment_id}"})
-
-    params = json.loads(row["params"])
-    old_value = None
-    for p in params:
-        if p.get("name") == param_name:
-            old_value = p.get("value")
-            p["value"] = new_value
-            break
-    else:
-        params.append({"name": param_name, "value": new_value})
-
-    from datetime import datetime, UTC
-    ts = datetime.now(UTC).isoformat()
-
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute(
-            "UPDATE judgment_objects SET params = ?, updated_at = ? WHERE judgment_id = ?",
-            (json.dumps(params, ensure_ascii=False), ts, judgment_id),
-        )
-        from pipeline.stage import _bump_version
-        version = _bump_version(conn)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    log_event(
-        EventType.PARAM_UPDATED,
-        actor="ai",
-        pathway="mcp",
-        payload={
-            "judgment_id": judgment_id,
-            "param_name": param_name,
-            "old_value": old_value,
-            "new_value": new_value,
-        },
-    )
-
-    return _attach_alerts({"version": version, "param_name": param_name, "new_value": new_value})
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# T3 — PROPOSE (AI can propose, only human can approve)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def propose_commit(
-    judgment_ids: list[str],
-    message: str,
-) -> dict:
-    """Propose a commit of judgment objects.
-
-    AI can only propose. Human approves via Friction Gate (GUI).
-    The proposal is stored as an overlay on each judgment.
-    """
+def propose_commit(judgment_ids: list[str], message: str) -> dict:
+    """Propose a commit. AI proposes, human approves via Friction Gate."""
     record_tool_call("propose_commit")
     from pipeline.audit import log_event
-    import json
+    from uuid import uuid4
 
-    proposal_id = __import__("uuid").uuid4().hex
+    proposal_id = uuid4().hex
 
     # Validate all judgments exist and are viscous
-    judgments = get_judgments(state=ArtifactState.VISCOUS)
+    judgments = get_judgments(state=JudgmentState.VISCOUS)
     valid_ids = {j["judgment_id"] for j in judgments}
     invalid = [jid for jid in judgment_ids if jid not in valid_ids]
     if invalid:
@@ -463,16 +261,6 @@ def propose_commit(
             "error": f"Invalid or non-viscous judgment IDs: {invalid}",
             "proposal_id": None,
         })
-
-    # Create proposal overlay on each judgment
-    for jid in judgment_ids:
-        add_overlay(
-            target_id=jid,
-            target_type="judgment",
-            overlay_type="proposal",
-            value={"proposal_id": proposal_id, "message": message},
-            created_by="ai",
-        )
 
     log_event(
         EventType.COMMIT_PROPOSED,
@@ -485,7 +273,8 @@ def propose_commit(
         },
     )
 
-    logger.info("commit proposed  proposal=%s  judgments=%d", proposal_id, len(judgment_ids))
+    logger.info("commit proposed  proposal=%s  judgments=%d",
+                proposal_id, len(judgment_ids))
     return _attach_alerts({
         "proposal_id": proposal_id,
         "judgment_ids": judgment_ids,

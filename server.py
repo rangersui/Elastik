@@ -2,20 +2,17 @@
 
 One port. Four entry points:
   /       → GUI (static index.html)
-  /mcp    → MCP endpoint (stdio + SSE)
-  /api    → REST API
   /ws     → WebSocket broadcast
+  /api    → REST API
   /docs   → Swagger
 
 FastAPI serves everything. Zero Redis. Zero microservices.
 """
 
-import asyncio
-import json
 import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import PORT, VERSION, setup_logging
@@ -31,7 +28,7 @@ logger = logging.getLogger("frictiondeck.server")
 app = FastAPI(
     title="FrictionDeck",
     version=VERSION,
-    description="Engineering judgment infrastructure. AI remembers everything. You just judge.",
+    description="Engineering judgment infrastructure.",
     docs_url="/docs",
 )
 
@@ -100,6 +97,102 @@ async def api_audit(limit: int = 50, offset: int = 0):
     return get_audit_log(limit=limit, offset=offset)
 
 
+@app.get("/api/proposals")
+async def api_proposals():
+    """Return pending commit proposals that still have viscous judgments."""
+    import json as _json
+    from pipeline.audit import get_audit_log
+    from pipeline.stage import get_judgments
+    from pipeline.constants import JudgmentState
+
+    def _payload(e):
+        p = e.get("payload")
+        if isinstance(p, str):
+            p = _json.loads(p)
+        return p or {}
+
+    # No viscous judgments → no actionable proposals
+    viscous_ids = {j["judgment_id"] for j in get_judgments(state=JudgmentState.VISCOUS)}
+    if not viscous_ids:
+        return []
+
+    proposed = get_audit_log(limit=100, event_type="commit_proposed")
+    approved = get_audit_log(limit=100, event_type="commit_approved")
+    rejected = get_audit_log(limit=100, event_type="commit_rejected")
+
+    closed_ids = set()
+    for e in approved + rejected:
+        closed_ids.add(_payload(e).get("proposal_id"))
+
+    pending = []
+    for e in proposed:
+        p = _payload(e)
+        pid = p.get("proposal_id")
+        if pid and pid not in closed_ids:
+            jids = p.get("judgment_ids", [])
+            # Only show if at least one judgment is still viscous
+            if any(jid in viscous_ids for jid in jids):
+                pending.append({
+                    "proposal_id": pid,
+                    "judgment_ids": jids,
+                    "message": p.get("message", ""),
+                    "timestamp": e.get("timestamp", ""),
+                })
+    return pending
+
+
+@app.get("/api/commits")
+async def api_commits():
+    """Return commit log: approved + rejected, with messages from proposals."""
+    import json as _json
+    from pipeline.audit import get_audit_log
+
+    def _payload(e):
+        p = e.get("payload")
+        if isinstance(p, str):
+            p = _json.loads(p)
+        return p or {}
+
+    # Build proposal_id → message lookup from proposed events
+    proposed = get_audit_log(limit=200, event_type="commit_proposed")
+    msg_map = {}
+    for e in proposed:
+        p = _payload(e)
+        pid = p.get("proposal_id")
+        if pid:
+            msg_map[pid] = p.get("message", "")
+
+    entries = []
+
+    for e in get_audit_log(limit=100, event_type="commit_approved"):
+        p = _payload(e)
+        pid = p.get("proposal_id", "")
+        entries.append({
+            "type": "approved",
+            "commit_id": p.get("commit_id", ""),
+            "proposal_id": pid,
+            "engineer": p.get("engineer", ""),
+            "message": msg_map.get(pid, ""),
+            "sealed_count": p.get("sealed", 0),
+            "hmac": e.get("event_hash", ""),
+            "timestamp": e.get("timestamp", ""),
+        })
+
+    for e in get_audit_log(limit=100, event_type="commit_rejected"):
+        p = _payload(e)
+        pid = p.get("proposal_id", "")
+        entries.append({
+            "type": "rejected",
+            "proposal_id": pid,
+            "reason": p.get("reason", ""),
+            "message": msg_map.get(pid, ""),
+            "timestamp": e.get("timestamp", ""),
+        })
+
+    entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return entries
+
+
 @app.get("/api/audit/verify")
 async def api_verify_chain():
     """Verify audit chain integrity."""
@@ -108,24 +201,6 @@ async def api_verify_chain():
 
 
 # ── GUI adapter API routes (human-only operations) ───────────────────────
-
-@app.post("/api/card/move")
-async def api_move_card(artifact_id: str, to_position: int):
-    from pipeline.gui_adapter import drag_card
-    return drag_card(artifact_id, to_position)
-
-
-@app.delete("/api/card/{artifact_id}")
-async def api_delete_card(artifact_id: str):
-    from pipeline.gui_adapter import gui_delete_card
-    return gui_delete_card(artifact_id)
-
-
-@app.post("/api/card/edit")
-async def api_edit_card(artifact_id: str, new_text: str):
-    from pipeline.gui_adapter import edit_card_text
-    return edit_card_text(artifact_id, new_text)
-
 
 @app.post("/api/param/lock")
 async def api_lock_param(judgment_id: str, param_name: str):
@@ -139,36 +214,16 @@ async def api_unlock_param(judgment_id: str, param_name: str):
     return unlock_parameter(judgment_id, param_name)
 
 
-@app.post("/api/gate/challenge")
-async def api_gate_challenge(proposal_id: str, session_id: str = "default"):
-    from pipeline.friction_gate import generate_challenge
-    return generate_challenge(proposal_id, session_id)
-
-
-@app.post("/api/gate/validate")
-async def api_gate_validate(
-    challenge_id: str, proposal_id: str, answer: str, session_id: str = "default",
-):
-    from pipeline.friction_gate import validate_answer
-    return validate_answer(challenge_id, proposal_id, answer, session_id)
-
-
 @app.post("/api/commit/approve")
-async def api_approve_commit(proposal_id: str, gate_token: str, engineer: str = "ranger"):
+async def api_approve_commit(proposal_id: str, engineer: str = "ranger"):
     from pipeline.gui_adapter import approve_commit
-    return approve_commit(proposal_id, gate_token, engineer)
+    return approve_commit(proposal_id, engineer)
 
 
 @app.post("/api/commit/reject")
 async def api_reject_commit(proposal_id: str, reason: str):
     from pipeline.gui_adapter import reject_commit
     return reject_commit(proposal_id, reason)
-
-
-@app.post("/api/ns/dismiss")
-async def api_dismiss_ns(artifact_id: str, reason: str):
-    from pipeline.gui_adapter import dismiss_negative_space
-    return dismiss_negative_space(artifact_id, reason)
 
 
 # ── Static files (must be last — catch-all) ──────────────────────────────

@@ -2,7 +2,6 @@
 
 Usage:
     from pipeline.prompts import load
-    prompt = load("nli_verify.md")
     prompt = load("server_instructions.md")
 """
 

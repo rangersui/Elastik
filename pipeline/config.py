@@ -21,6 +21,7 @@ _CONFIG_PATH = os.path.join(_DB_DIR, "config.json")
 
 VERSION = "4.0.0-alpha"
 PORT = int(os.environ.get("FRICTIONDECK_PORT", "3004"))
+PERSONAL_MODE = os.environ.get("FRICTIONDECK_MODE", "personal") == "personal"
 
 
 # ── Logging ──────────────────────────────────────────────────────────────

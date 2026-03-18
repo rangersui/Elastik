@@ -1,12 +1,7 @@
 """FrictionDeck v4 — Audit Layer
 
 Append-only HMAC-SHA256 hash-chain ledger.
-Every event is hash-linked to its predecessor, making tampering detectable.
-
-DB file: data/audit.db (configurable via FRICTIONDECK_DB_DIR).
-Audit ledger is append-only, never deleted.
-
-This is the black box. Not a firewall. A flight recorder.
+The black box. Not a firewall. A flight recorder.
 """
 
 import hashlib
@@ -190,20 +185,20 @@ def get_audit_log(
 # ── Chain verification ───────────────────────────────────────────────────────
 
 
-def verify_chain(limit: int = 0) -> dict:
-    """Verify hash chain integrity.
+def _break_info(event: dict, index: int, expected: str) -> dict:
+    """Build a chain-break info dict."""
+    return {
+        "event_index": index,
+        "expected": expected,
+        "got": event.get("prev_hash") or event.get("event_hash", "")[:16],
+        "event_type": event["event_type"],
+        "created_at": event["timestamp"],
+    }
 
-    Returns dict with keys:
-        valid       – True (all OK), False (chain linkage broken)
-        degraded    – True when chain linkage is intact but some per-event
-                      hashes are unverifiable
-        total_events, verified_events, unverifiable_events,
-        anomalies, first_break, verified_at
-    """
-    from pipeline.config import AUDIT_HMAC_KEY
 
+def _fetch_events(limit: int) -> list[dict]:
+    """Fetch audit events for verification."""
     conn = _get_conn()
-
     if limit > 0:
         rows = conn.execute(
             "SELECT * FROM audit_events ORDER BY id ASC "
@@ -214,84 +209,56 @@ def verify_chain(limit: int = 0) -> dict:
         rows = conn.execute(
             "SELECT * FROM audit_events ORDER BY id ASC",
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def verify_chain(limit: int = 0) -> dict:
+    """Verify hash chain integrity."""
+    from pipeline.config import AUDIT_HMAC_KEY
 
     base: dict = {
-        "valid": True,
-        "degraded": False,
-        "total_events": 0,
-        "verified_events": 0,
-        "unverifiable_events": 0,
-        "anomalies": 0,
-        "first_break": None,
+        "valid": True, "degraded": False, "total_events": 0,
+        "verified_events": 0, "unverifiable_events": 0,
+        "anomalies": 0, "first_break": None,
         "verified_at": datetime.now(UTC).isoformat(),
     }
 
-    if not rows:
+    events = _fetch_events(limit)
+    if not events:
         return base
 
-    events = [dict(r) for r in rows]
-    verified = 0
-    tampered = 0
-
+    verified = tampered = 0
     for i, event in enumerate(events):
-        # ── 1. Chain linkage check ──
-        if i == 0:
-            if event["id"] == 1 and event["prev_hash"] != "GENESIS":
-                base["valid"] = False
-                base["total_events"] = len(events)
-                base["anomalies"] = 1
-                base["first_break"] = {
-                    "event_index": 1,
-                    "expected": "GENESIS",
-                    "got": event["prev_hash"],
-                    "event_type": event["event_type"],
-                    "created_at": event["timestamp"],
-                }
-                return base
-        else:
-            if event["prev_hash"] != events[i - 1]["event_hash"]:
-                base["valid"] = False
-                base["total_events"] = len(events)
-                base["verified_events"] = verified
-                base["anomalies"] = 1
-                base["first_break"] = {
-                    "event_index": i + 1,
-                    "expected": events[i - 1]["event_hash"],
-                    "got": event["prev_hash"],
-                    "event_type": event["event_type"],
-                    "created_at": event["timestamp"],
-                }
-                return base
+        # Chain linkage check
+        if i == 0 and event["id"] == 1 and event["prev_hash"] != "GENESIS":
+            base.update(valid=False, total_events=len(events), anomalies=1,
+                        first_break=_break_info(event, 1, "GENESIS"))
+            return base
+        if i > 0 and event["prev_hash"] != events[i - 1]["event_hash"]:
+            base.update(valid=False, total_events=len(events),
+                        verified_events=verified, anomalies=1,
+                        first_break=_break_info(event, i + 1, events[i - 1]["event_hash"]))
+            return base
 
-        # ── 2. Per-event hash verification ──
-        expected_hash = _compute_hash(
+        # Per-event HMAC check
+        expected = _compute_hash(
             event["event_id"], event["event_type"], event["timestamp"],
             event["prev_hash"], event["environment"], event["payload"],
             key=AUDIT_HMAC_KEY,
         )
-
-        if event["event_hash"] == expected_hash:
+        if event["event_hash"] == expected:
             verified += 1
         else:
             tampered += 1
             if not base["first_break"]:
-                base["first_break"] = {
-                    "event_index": i + 1,
-                    "expected": expected_hash[:16] + "…",
-                    "got": event["event_hash"][:16] + "…",
-                    "event_type": event["event_type"],
-                    "created_at": event["timestamp"],
-                    "reason": "tampered",
-                }
+                info = _break_info(event, i + 1, expected[:16] + "…")
+                info["reason"] = "tampered"
+                base["first_break"] = info
 
     base["total_events"] = len(events)
     base["verified_events"] = verified
-
     if tampered > 0:
-        base["valid"] = False
-        base["degraded"] = True
-        base["anomalies"] = tampered
-
+        base.update(valid=False, degraded=True, anomalies=tampered)
     return base
 
 
