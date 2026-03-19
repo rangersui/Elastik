@@ -311,4 +311,5 @@ async def stage_view(stage_name: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    from pipeline.config import HOST
+    uvicorn.run(app, host=HOST, port=PORT)

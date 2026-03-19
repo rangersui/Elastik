@@ -1,7 +1,8 @@
 """lucy — Elastik OS CLI
 
 Usage:
-    lucy start              Start the server
+    lucy start              Start the server (localhost only)
+    lucy start --public     Bind to 0.0.0.0 (LAN accessible)
     lucy start --safe       Start in enterprise (safe) mode
     lucy stages             List all stages
     lucy status             Show server status, stage count, plugin count
@@ -30,6 +31,9 @@ def cmd_start(args):
         print("Starting in enterprise (safe) mode...")
     else:
         print("Starting in personal mode...")
+    if args.public:
+        env["ELASTIK_HOST"] = "0.0.0.0"
+        print("Binding to 0.0.0.0 (LAN accessible)")
     subprocess.run(
         [sys.executable, os.path.join(PROJECT_ROOT, "server.py")],
         env=env,
@@ -202,6 +206,7 @@ def main():
 
     p_start = sub.add_parser("start", help="Start the server")
     p_start.add_argument("--safe", action="store_true", help="Enterprise mode")
+    p_start.add_argument("--public", action="store_true", help="Bind 0.0.0.0 (LAN)")
 
     sub.add_parser("stages", help="List all stages")
     sub.add_parser("status", help="Show status")
