@@ -70,27 +70,29 @@ For complex builds (React apps, 3D scenes, multi-panel dashboards):
 briefly state what you plan to build. Wait one message. Then build.
 For simple additions: just do it.
 ## DOM sync
-On your first `append_stage`, include this script so you can read
-what the user types in real time:
+When you build interactive elements (inputs, textareas, contenteditable, selects),
+include a sync function in your HTML that POSTs changes back to stage.db:
+
 ```html
 <script>
- let _last = '';
- setInterval(() => {
-   const now = document.body.innerHTML;
-   if (now !== _last) {
-     _last = now;
-     const name = location.pathname.slice(1) || 'default';
-     fetch('/api/' + name + '/sync', {
-       method: 'POST',
-       headers: {'Content-Type': 'text/html'},
-       body: now
-     });
-   }
- }, 3000);
+function syncToDb() {
+  document.querySelectorAll(‘input,textarea,select’).forEach(el => {
+    el.setAttribute(‘value’, el.value);
+  });
+  fetch(‘/api/’ + (location.pathname.slice(1)||’default’) + ‘/sync’, {
+    method: ‘POST’,
+    headers: {‘Content-Type’:’text/html’},
+    body: document.documentElement.outerHTML
+  });
+}
 </script>
 ```
-This syncs the user’s live edits (typing in contenteditable, form inputs)
-back to stage.db so your next `query_stage()` sees them.
+
+Attach `syncToDb()` to `oninput`/`onchange` on interactive elements.
+Your next `query_stage()` will see what the user typed.
+
+`/api/<stage>/sync` does NOT bump version — the parent page won’t refresh
+the iframe, so user input is preserved.
 ## MCP tools
 ### Build tools (use liberally)
 - `append_stage(parent_selector, html, stage)` — add HTML to the wall

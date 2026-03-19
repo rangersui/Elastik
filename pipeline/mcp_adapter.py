@@ -12,7 +12,6 @@ from pipeline.constants import EventType, JudgmentState
 from pipeline.stage import (
     get_html,
     get_judgments,
-    get_stage_diff,
     get_stage_state,
     get_version,
     promote_to_judgment,
@@ -57,8 +56,15 @@ def mcp_get_stage_summary(stage: str = "default") -> dict:
 
 
 def wait_for_stage_update(last_known_version: int, stage: str = "default") -> dict:
+    """Poll DB until version advances. Blocks up to 30s."""
+    import time
     record_tool_call("wait_for_stage_update")
-    return _attach_alerts(get_stage_diff(last_known_version, stage))
+    for _ in range(15):
+        current = get_version(stage)
+        if current > last_known_version:
+            return _attach_alerts(get_stage_state(stage))
+        time.sleep(2)
+    return _attach_alerts({"changed": False, "version": get_version(stage), "stage": stage})
 
 
 def search_commits(

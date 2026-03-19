@@ -39,6 +39,12 @@ Multi-Stage:
   create_stage(name) → create a new Stage.
   Each Stage is independent: own HTML, own judgments, own history chain.
 
+DOM sync:
+  For interactive elements, include a syncToDb() function that POSTs
+  document.documentElement.outerHTML to /api/<stage>/sync.
+  Attach to oninput/onchange. Sync does NOT bump version — iframe won't reset.
+  Your next query_stage() will see user input.
+
 Plugins & MCP Tools:
   Need new backend capability? propose_plugin(name, code, description, permissions).
   Need a new MCP tool? propose_mcp_tool(name, code, description, parameters).

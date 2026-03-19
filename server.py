@@ -130,10 +130,16 @@ async def api_stage(stage_name: str):
 
 @app.post("/api/{stage_name}/sync")
 async def api_sync(stage_name: str, request: Request):
-    """Receive DOM sync from iframe. Silent write — no version bump, no broadcast."""
-    from pipeline.stage import set_html_silent
+    """Receive DOM sync from iframe. No version bump, no broadcast."""
+    from pipeline.stage import _get_conn
+    from datetime import datetime, UTC
     html = (await request.body()).decode("utf-8", errors="replace")
-    set_html_silent(html, stage=stage_name)
+    conn = _get_conn(stage_name)
+    conn.execute(
+        "UPDATE stage_meta SET stage_html = ?, updated_at = ? WHERE id = 1",
+        (html, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
     return {"status": "ok"}
 
 

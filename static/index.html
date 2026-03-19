@@ -5,20 +5,7 @@
 <iframe id="f" sandbox="allow-scripts allow-same-origin allow-popups" srcdoc=""></iframe>
 <script>
 const s=window.location.pathname.slice(1)||'default';let v=0;
-const iframe=document.getElementById('f');
-function injectSync(){
-  try{
-    const doc=iframe.contentDocument;
-    if(!doc||!doc.body)return;
-    if(doc.getElementById('_esync'))return;
-    const sc=doc.createElement('script');
-    sc.id='_esync';
-    sc.textContent=`let _last="";setInterval(()=>{document.querySelectorAll("input,textarea,select").forEach(e=>{if(e.type==="checkbox"||e.type==="radio"){e.checked?e.setAttribute("checked",""):e.removeAttribute("checked")}else{e.setAttribute("value",e.value)}if(e.tagName==="TEXTAREA")e.textContent=e.value});const n=document.body.innerHTML;if(n!==_last){_last=n;fetch("/api/${s}/sync",{method:"POST",headers:{"Content-Type":"text/html"},body:n})}},3000)`;
-    doc.body.appendChild(sc);
-  }catch(_){}
-}
-iframe.onload=injectSync;
-async function p(){try{const d=await(await fetch('/api/'+s+'/stage')).json();if(d.version>v){v=d.version;iframe.srcdoc=d.stage_html||''}}catch(_){}}
+async function p(){try{const d=await(await fetch('/api/'+s+'/stage')).json();if(d.version>v){v=d.version;document.getElementById('f').srcdoc=d.stage_html||''}}catch(_){}}
 p();setInterval(p,1000);
 </script>
 </body></html>
