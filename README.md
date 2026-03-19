@@ -80,7 +80,7 @@ Every path is a world. Visit a path that doesn't exist — it's created.
 
 ```
 localhost:3004/work     → work world
-localhost:3004/albon    → project world
+localhost:3004/project    → project world
 localhost:3004/home     → personal world
 ```
 
