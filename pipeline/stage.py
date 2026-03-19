@@ -169,6 +169,19 @@ def set_html(html: str, stage: str = "default") -> dict:
     return {"version": version}
 
 
+def set_html_silent(html: str, stage: str = "default") -> None:
+    """Write stage_html without bumping version or broadcasting.
+
+    Used by DOM sync — parent poll won't see a change, iframe won't reset.
+    """
+    conn = _get_conn(stage)
+    conn.execute(
+        "UPDATE stage_meta SET stage_html = ?, updated_at = ? WHERE id = 1",
+        (html, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # JUDGMENT OBJECT operations (audit layer — viscous/solid state)
 # ═══════════════════════════════════════════════════════════════════════════
