@@ -112,12 +112,18 @@ History logs everything automatically — judgments are for when precision matte
 - `create_stage(name)` — create a new world
 - `get_proxy_whitelist()` — list available APIs
 ### Plugin tools (self-evolution)
-- `propose_plugin(name, code, description, permissions, stage)` — propose a backend plugin
+- `propose_plugin(name, code, description, permissions, stage)` — propose a backend HTTP plugin
 - `list_plugin_proposals(stage)` — check status of proposed plugins
+- `propose_mcp_tool(name, code, description, parameters, stage)` — propose a new MCP tool
+- `list_mcp_tool_proposals(stage)` — check status of proposed MCP tools
 
-You write the plugin code. The human approves it. It hot-loads into the server.
-Use this when you need new backend capabilities (file access, database queries,
-custom API integrations). The plugin gets routes, proxy whitelist entries, everything.
+Two types of self-evolution:
+1. **HTTP plugins** — new routes + proxy whitelist. Hot-loaded into FastAPI.
+2. **MCP tools** — new tools you can call. Hot-loaded into FastMCP on restart.
+
+You write the code. The human approves it. It loads.
+Use plugins for backend capabilities (file access, APIs, databases).
+Use MCP tools for new AI-callable operations.
 
 ### Human-only tools
 - approve_commit — human seals judgments

@@ -21,6 +21,9 @@ setup_logging()
 init_history_db()
 init_stage_db()
 
+# Load custom MCP tools from plugins/mcp_tools/
+from pipeline.plugins import load_all_mcp_tools as _load_mcp_tools
+
 from pipeline.prompts import load as _load_prompt
 SERVER_INSTRUCTIONS = _load_prompt(
     "server_instructions.md",
@@ -28,6 +31,12 @@ SERVER_INSTRUCTIONS = _load_prompt(
 )
 
 mcp = FastMCP("FrictionDeck", instructions=SERVER_INSTRUCTIONS)
+
+# Hot-load custom MCP tools
+_loaded_mcp_tools = _load_mcp_tools(mcp)
+if _loaded_mcp_tools:
+    import logging as _logging
+    _logging.getLogger("frictiondeck.mcp_server").info("custom mcp tools loaded: %s", _loaded_mcp_tools)
 
 
 def _json(obj: dict) -> str:
@@ -169,6 +178,30 @@ def propose_plugin(
 def list_plugin_proposals(stage: str = "default") -> str:
     """List pending plugin proposals awaiting human approval."""
     from pipeline.mcp_adapter import mcp_list_plugin_proposals as _list
+    return _json(_list(stage))
+
+
+@mcp.tool()
+def propose_mcp_tool(
+    name: str, code: str, description: str,
+    parameters: str = "{}", stage: str = "default",
+) -> str:
+    """Propose a new MCP tool for human approval.
+
+    name: Tool name (alphanumeric + hyphens + underscores)
+    code: Python source code defining a function with the same name
+    description: What the tool does
+    parameters: JSON object describing parameters
+    """
+    from pipeline.mcp_adapter import mcp_propose_mcp_tool as _propose
+    params = json.loads(parameters) if isinstance(parameters, str) else parameters
+    return _json(_propose(name, code, description, params, stage))
+
+
+@mcp.tool()
+def list_mcp_tool_proposals(stage: str = "default") -> str:
+    """List pending MCP tool proposals awaiting human approval."""
+    from pipeline.mcp_adapter import mcp_list_mcp_tool_proposals as _list
     return _json(_list(stage))
 
 

@@ -39,10 +39,10 @@ Multi-Stage:
   create_stage(name) → create a new Stage.
   Each Stage is independent: own HTML, own judgments, own history chain.
 
-Plugins:
+Plugins & MCP Tools:
   Need new backend capability? propose_plugin(name, code, description, permissions).
-  Human approves → plugin hot-loads → new routes + proxy whitelist entries.
-  list_plugin_proposals() to check status.
+  Need a new MCP tool? propose_mcp_tool(name, code, description, parameters).
+  Human approves → hot-loads. list_plugin_proposals() / list_mcp_tool_proposals().
 
 Mode details:
   personal — iframe has allow-same-origin. Stage JS can fetch /proxy/*.

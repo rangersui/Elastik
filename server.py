@@ -213,6 +213,45 @@ async def api_reject_plugin(request: Request):
     return reject_plugin(proposal_id, reason, stage=stage)
 
 
+# ── MCP Tool routes (human only) ──────────────────────────────────────────
+
+@app.get("/api/mcp-tools")
+async def api_mcp_tools():
+    from pipeline.plugins import list_installed_mcp_tools
+    return list_installed_mcp_tools()
+
+
+@app.get("/api/mcp-tools/proposals")
+async def api_mcp_tool_proposals(stage: str = "default"):
+    from pipeline.plugins import list_mcp_tool_proposals
+    return list_mcp_tool_proposals(stage)
+
+
+@app.post("/api/mcp-tools/approve")
+async def api_approve_mcp_tool(request: Request):
+    data = await request.json()
+    proposal_id = data.get("proposal_id")
+    stage = data.get("stage", "default")
+    if not proposal_id:
+        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
+    from pipeline.plugins import approve_mcp_tool
+    # Note: MCP server is a separate process — hot-load only works within that process.
+    # For the HTTP server, we just write the file. MCP server picks it up on restart.
+    return approve_mcp_tool(proposal_id, mcp_instance=None, stage=stage)
+
+
+@app.post("/api/mcp-tools/reject")
+async def api_reject_mcp_tool(request: Request):
+    data = await request.json()
+    proposal_id = data.get("proposal_id")
+    reason = data.get("reason", "")
+    stage = data.get("stage", "default")
+    if not proposal_id:
+        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
+    from pipeline.plugins import reject_mcp_tool
+    return reject_mcp_tool(proposal_id, reason, stage=stage)
+
+
 # ── Static files ─────────────────────────────────────────────────────────
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

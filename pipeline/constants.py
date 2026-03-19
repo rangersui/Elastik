@@ -28,6 +28,11 @@ class EventType:
     PLUGIN_APPROVED = "plugin_approved"
     PLUGIN_REJECTED = "plugin_rejected"
 
+    # MCP Tools
+    MCP_TOOL_PROPOSED = "mcp_tool_proposed"
+    MCP_TOOL_APPROVED = "mcp_tool_approved"
+    MCP_TOOL_REJECTED = "mcp_tool_rejected"
+
     # Negative space
     NEGATIVE_SPACE_FLAGGED = "negative_space_flagged"
 

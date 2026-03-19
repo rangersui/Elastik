@@ -150,6 +150,23 @@ def mcp_list_plugin_proposals(stage: str = "default") -> dict:
     return _attach_alerts({"proposals": list_plugin_proposals(stage)})
 
 
+def mcp_propose_mcp_tool(
+    name: str, code: str, description: str,
+    parameters: dict | None = None, stage: str = "default",
+) -> dict:
+    """AI proposes a new MCP tool. Human must approve."""
+    record_tool_call("propose_mcp_tool")
+    from pipeline.plugins import propose_mcp_tool
+    return _attach_alerts(propose_mcp_tool(name, code, description, parameters, stage))
+
+
+def mcp_list_mcp_tool_proposals(stage: str = "default") -> dict:
+    """List pending MCP tool proposals."""
+    record_tool_call("list_mcp_tool_proposals")
+    from pipeline.plugins import list_mcp_tool_proposals
+    return _attach_alerts({"proposals": list_mcp_tool_proposals(stage)})
+
+
 # ── T2 — DOM operations ──────────────────────────────────────────────────
 
 def mutate_stage(selector: str, new_html: str, stage: str = "default") -> dict:
