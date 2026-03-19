@@ -17,11 +17,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from pipeline.config import (
-    PORT, VERSION, PROXY_WHITELIST,
-    CSP_SCRIPT_WHITELIST, CSP_STYLE_WHITELIST, CSP_FONT_WHITELIST,
-    setup_logging,
-)
+from pipeline.config import PORT, VERSION, PROXY_WHITELIST, setup_logging
 from pipeline.broadcast import broadcast, subscribe, unsubscribe
 from pipeline.stage import set_broadcast, init_stage_db
 
@@ -40,21 +36,15 @@ app = FastAPI(
 
 # ── CSP middleware ────────────────────────────────────────────────────────
 
-def _build_csp() -> str:
-    scripts = " ".join(CSP_SCRIPT_WHITELIST)
-    styles = " ".join(CSP_STYLE_WHITELIST)
-    fonts = " ".join(CSP_FONT_WHITELIST)
-    return (
-        "default-src 'self'; "
-        f"script-src 'unsafe-inline' {scripts}; "
-        "connect-src 'self'; "
-        "frame-src 'self'; "
-        "img-src * data:; "
-        f"style-src 'unsafe-inline' {styles}; "
-        f"font-src {fonts}"
-    ).strip()
-
-CSP = _build_csp()
+CSP = (
+    "default-src 'self' data: blob:; "
+    "script-src 'unsafe-inline' 'unsafe-eval' https: data:; "
+    "style-src 'unsafe-inline' https: data:; "
+    "img-src * data: blob:; "
+    "media-src * data: blob:; "
+    "font-src * data:; "
+    "connect-src 'self'"
+)
 
 
 @app.middleware("http")
