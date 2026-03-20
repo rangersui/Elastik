@@ -148,3 +148,12 @@ elastik-rust           →  Rust (future)
 
 Five rules. Three mailboxes. One integer. One hash chain.
 A protocol for human-AI interaction.
+
+Five rules describe concepts, not technologies.
+Any implementation that:
+- RECEIVES
+- TRANSPORTS
+- STORES
+- SIGNS
+- RENDERS STRINGS
+are elastik-compatible. 
