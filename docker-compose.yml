@@ -1,0 +1,11 @@
+version: '3'
+services:
+  elastik:
+    build: .
+    ports:
+      - "3004:3004"
+    volumes:
+      - ./data:/elastik/data
+      - ./plugins:/elastik/plugins
+    environment:
+      - ELASTIK_HOST=0.0.0.0

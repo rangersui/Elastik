@@ -78,17 +78,31 @@ def cmd_list(_):
     if not ps: print("no plugins."); return
     for p in ps: print(f"  {p}")
 
+def cmd_evolve(_):
+    subprocess.run(["docker", "compose", "-f", str(ROOT / "docker-compose.dev.yml"), "up", "-d"])
+
+def cmd_deploy(_):
+    subprocess.run(["docker", "compose", "-f", str(ROOT / "docker-compose.yml"), "up", "-d"])
+
+def cmd_logs(_):
+    subprocess.run(["docker", "compose", "logs", "-f"])
+
+def cmd_enter(_):
+    subprocess.run(["docker", "exec", "-it", "elastik-dev", "bash"])
+
 def main():
     ap = argparse.ArgumentParser(prog="lucy", description="elastik CLI")
     sp = ap.add_subparsers(dest="cmd")
     s = sp.add_parser("start"); s.add_argument("--public", action="store_true"); s.add_argument("--port", type=int)
     sp.add_parser("stages"); sp.add_parser("status"); sp.add_parser("list")
+    sp.add_parser("evolve"); sp.add_parser("deploy"); sp.add_parser("logs"); sp.add_parser("enter")
     c = sp.add_parser("create"); c.add_argument("name")
     i = sp.add_parser("install"); i.add_argument("name")
     r = sp.add_parser("remove"); r.add_argument("name")
     args = ap.parse_args()
     cmds = {"start":cmd_start,"stages":cmd_stages,"create":cmd_create,"status":cmd_status,
-            "install":cmd_install,"remove":cmd_remove,"list":cmd_list}
+            "install":cmd_install,"remove":cmd_remove,"list":cmd_list,
+            "evolve":cmd_evolve,"deploy":cmd_deploy,"logs":cmd_logs,"enter":cmd_enter}
     if args.cmd in cmds: cmds[args.cmd](args)
     else: ap.print_help()
 

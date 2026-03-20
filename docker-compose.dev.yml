@@ -1,0 +1,11 @@
+version: '3'
+services:
+  elastik-dev:
+    build:
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3005:3004"
+    volumes:
+      - .:/elastik
+    environment:
+      - ELASTIK_HOST=0.0.0.0
