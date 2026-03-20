@@ -149,7 +149,29 @@ POST /plugins/approve   header: X-Approve-Token: {token}
 
 Approve token is in the terminal. AI can't see it. Physics, not policy.
 
----
+## Self-Evolution
+
+~200 lines. Zero frameworks. AI reads the entire codebase in one context window.
+
+```bash
+
+python lucy.py evolve   # start dev container (port 3005)
+
+python lucy.py enter    # step inside
+
+python lucy.py deploy   # deploy to production
+
+python lucy.py logs     # watch
+
+
+In the dev container, AI edits server.py, runs pytest, commits.
+
+You review the diff. You merge. New version goes live.
+
+Docker is the training ground. Production is deployment.
+
+git merge is the only approve button.
+```
 
 ## Files
 
