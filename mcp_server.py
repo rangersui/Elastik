@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("elastik")
 BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
+TOKEN = os.getenv("ELASTIK_TOKEN", "")
 
 @mcp.tool()
 async def http(method: str, path: str, body: str = "") -> str:
@@ -15,8 +16,11 @@ async def http(method: str, path: str, body: str = "") -> str:
     path: e.g. /default/read, /default/write, /stages
     body: request body (for POST)
     """
+    headers = {}
+    if TOKEN:
+        headers["X-Auth-Token"] = TOKEN
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.request(method, BASE + path, content=body if body else None)
+        r = await c.request(method, BASE + path, content=body if body else None, headers=headers)
         return r.text
 
 if __name__ == "__main__":
