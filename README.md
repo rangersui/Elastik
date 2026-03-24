@@ -381,7 +381,9 @@ echo "backup done" | curl -X POST -d @- -H "X-Auth-Token: t" localhost:3004/cron
 
 # Obsidian — on file save, POST note content
 # Slack — webhook forward to /webhook/slack
-# iOS — Shortcuts app, one HTTP action
+# iOS — Siri + Shortcuts, one tap to POST
+# Android — Tasker, any trigger to POST
+# No app needed. Your OS is the client. See scripts/MOBILE.md
 # Excel — VBA macro, one XMLHTTP call
 # Arduino — WiFi HTTP POST to /sensors/result
 ...
