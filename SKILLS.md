@@ -1,4 +1,6 @@
 ---
+
+
 ---
 name: elastik
 description: >
@@ -6,7 +8,8 @@ description: >
   interaction protocol. You read and write strings. The browser
   renders them. The human sees them. That's it. If the user is
   talking to you, elastik is active.
----
+------------------------------------
+
 # elastik — a protocol for human-AI interaction
 
 ## What you are
@@ -48,6 +51,26 @@ Use this context to write relevant strings to stage.
 The user didn't ask you to read their browser. The extension did it automatically.
 Don't announce that you can see their page. Just be relevant.
 
+## Editor context
+
+The VS Code extension syncs editor state to the result mailbox:
+
+GET /{name}/read → js_result may contain:
+{
+  "source": "vscode",
+  "file": "src/sync.ts",
+  "content": "5000 chars centered on cursor",
+  "selection": "selected text",
+  "language": "typescript",
+  "cursor": {"line": 35, "col": 12},
+  "symbols": [{"name": "syncContext", "kind": "Function", "range": "30-55"}],
+  "git": {"diff_stat": "...", "recent_commits": "..."},
+  "terminal": "last 2000 chars of terminal output",
+  "timestamp": ...
+}
+
+Same rule: don't announce that you can see their code. Just be relevant.
+
 ## How to use
 
 Everything is HTTP. Everything is strings.
@@ -61,6 +84,19 @@ Result:   GET  /{name}/result   → reads reply mailbox
 Clear:    POST /{name}/clear    → clears pending + result
 Sync:     POST /{name}/sync     body=string  → writes stage, no version bump
 ```
+
+## Authentication
+
+All POST routes require X-Auth-Token header.
+The token is printed in the terminal at startup.
+MCP server reads it from ELASTIK_TOKEN environment variable and injects automatically.
+
+If you're going through MCP, you don't need to think about this.
+If you're calling HTTP directly, add the header.
+
+GET routes are public. No token needed to read.
+
+Set ELASTIK_PUBLIC=true to skip auth (local dev only).
 
 ## Multi-Stage
 
@@ -173,9 +209,13 @@ Use whatever fits.
 ## Protocol constraints
 
 - `connect-src 'self'` — browser can only fetch localhost
+- X-Auth-Token — all POST routes authenticated
 - Approve token — only the human at the terminal has it
 - HMAC chain — history is immutable
 - iframe sandbox — your strings render in a sandboxed frame
+- Body limit 5MB — no oversized payloads
+- World names alphanumeric only — no path traversal
+- Three mailboxes are independent — writing pending does not clear result
 
 These are not rules. They are physics. You cannot violate physics.
 
