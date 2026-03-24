@@ -144,7 +144,7 @@ You review the diff. You merge. Or you don't.
 
 Worst case: `git revert`.
 
-******Server hardening******
+### Server hardening
 
 All POST routes require **`X-Auth-Token`** header (printed at startup)
 
@@ -247,7 +247,14 @@ Any MCP-compatible client:
 }
 ```
 
-The MCP server has one tool: `http(method, path, body)`. It translates MCP calls to HTTP requests. When AI can send HTTP directly, this file disappears.
+The MCP server has one tool: http(method, path, body, headers).
+It translates MCP calls to HTTP requests.
+
+It also serves as a security layer: the auth token is injected
+from an environment variable. AI uses the key without seeing it.
+
+When AI can send HTTP directly, MCP stays 
+not as a translator, but as a token isolator.
 
 ---
 
