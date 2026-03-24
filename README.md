@@ -148,27 +148,47 @@ Nobody told it to. It chose to.
 
 ## Security
 
-Three layers. All physical. None semantic.
+All physical. None semantic.
 
 **Layer 1 — iframe sandbox** (frontend)
-
-AI paints freely inside. `connect-src 'self'` — can only fetch localhost.
-
+AI paints inside a sandboxed frame. `connect-src 'self'`.
 Worst case: refresh the page.
 
 **Layer 2 — Docker container** (backend)
-
 Server runs inside a container. AI can't touch the host.
-
 Worst case: `docker restart`.
 
-**Layer 3 — git merge** (evolution)
+**Layer 3 — auth token** (API)
+All POST routes require `X-Auth-Token`. Token printed in terminal.
+AI through MCP uses the token without seeing it.
+AI can open the door but doesn't know the key.
 
+**Layer 4 — HMAC chain** (audit)
+Every action logged. Chain-linked. Immutable.
+Tamper with one record, the entire chain breaks.
+
+**Layer 5 — git merge** (evolution)
 AI edits code in dev container. Commits. Pushes.
-
 You review the diff. You merge. Or you don't.
-
 Worst case: `git revert`.
+
+**Layer 6 — client filtering** (extensions)
+Browser extension: domain blacklist — banking and login sites excluded.
+VS Code extension: `.elastikignore` — sensitive files never synced.
+Terminal output scrubbed — lines with passwords/tokens stripped.
+Opt-in required. Remote server warning on non-localhost.
+
+**Server hardening**
+- Request body capped at 5MB
+- World names restricted to `[a-zA-Z0-9_-]`
+- `ELASTIK_PUBLIC=true` to skip auth (local dev only)
+
+The LLM is an untrusted HTTP client.
+The same security principle that protects web servers from malicious browsers.
+30 years old. Still works.
+
+AI proposes. Human approves.
+If elastik destroys the world, a human handed over the key.
 
 ### Server hardening
 
@@ -317,5 +337,15 @@ We just removed everything else.
 **universe.db** — space and time in one file.
 
 ---
+
+## Ecosystem
+```
+elastik              → protocol + server (~200 lines)
+elastik-extension    → Lucy in every browser tab
+elastik-vscode       → Lucy in every editor tab
+```
+
+- [elastik-extension](https://github.com/rangersui/elastik-extension) — Chrome extension, DOM sync, domain blacklist
+- [elastik-vscode](https://github.com/rangersui/elastik-vscode) — VS Code extension, editor context sync, .elastikignore
 
 *Copyright © 2026 Ranger Chen . MIT License.*
