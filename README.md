@@ -30,7 +30,7 @@ Or with Docker:
 
 docker compose up
 
-Open `http://localhost:3004`. Empty. 
+Open `http://localhost:3004`. Empty.
 Say something to your AI.
 
 ---
@@ -120,7 +120,6 @@ Nobody told it to. It chose to.
 
 ---
 
-
 ## Security
 
 Three layers. All physical. None semantic.
@@ -145,11 +144,20 @@ You review the diff. You merge. Or you don't.
 
 Worst case: `git revert`.
 
+******Server hardening******
+
+All POST routes require **`X-Auth-Token`** header (printed at startup)
+
+GET routes are public (read-only)
+Request body capped at 5MB
+World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal
+Set **`ELASTIK_PUBLIC=true`** to skip auth (local dev only)
+
 **Approve token** — printed in terminal. AI doesn't have it.
 
 **HMAC chain** — every action logged, immutable.
 
-The LLM itself is an untrusted HTTP client. 
+The LLM itself is an untrusted HTTP client.
 
 The same secruity principle that protects web servers from malicious broswers.
 
