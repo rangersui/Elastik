@@ -30,8 +30,34 @@ Or with Docker:
 
 docker compose up
 
-Open `http://localhost:3004`. Empty. 
+Open `http://localhost:3004`. Empty.
 Say something to your AI.
+
+## Configuration
+
+Create a `.env` file in the project root:
+
+```
+ELASTIK_TOKEN=your-secret-token-here
+```
+
+This token is used for:
+
+- Authenticating all POST requests (X-Auth-Token header)
+- Plugin approval (X-Approve-Token header)
+- MCP server auto-injection
+
+If not set, a random token is generated on each restart.
+
+Docker reads from `.env` automatically. For MCP, add to Claude Desktop config:
+
+```json
+"env": {
+  "ELASTIK_TOKEN": "same-token-as-env-file"
+}
+```
+
+Never commit `.env` to git.
 
 ---
 
@@ -120,7 +146,6 @@ Nobody told it to. It chose to.
 
 ---
 
-
 ## Security
 
 Three layers. All physical. None semantic.
@@ -145,11 +170,20 @@ You review the diff. You merge. Or you don't.
 
 Worst case: `git revert`.
 
+### Server hardening
+
+All POST routes require **`X-Auth-Token`** header (printed at startup)
+
+GET routes are public (read-only)
+Request body capped at 5MB
+World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal
+Set **`ELASTIK_PUBLIC=true`** to skip auth (local dev only)
+
 **Approve token** — printed in terminal. AI doesn't have it.
 
 **HMAC chain** — every action logged, immutable.
 
-The LLM itself is an untrusted HTTP client. 
+The LLM itself is an untrusted HTTP client.
 
 The same secruity principle that protects web servers from malicious broswers.
 
@@ -239,9 +273,25 @@ Any MCP-compatible client:
 }
 ```
 
-The MCP server has one tool: `http(method, path, body)`. It translates MCP calls to HTTP requests. When AI can send HTTP directly, this file disappears.
+The MCP server has one tool: http(method, path, body, headers).
+It translates MCP calls to HTTP requests.
+
+It also serves as a security layer: the auth token is injected
+from an environment variable. AI uses the key without seeing it.
+
+When AI can send HTTP directly, MCP stays
+not as a translator, but as a token isolator.
 
 ---
+
+## Roadmap
+
+- [ ] Read authentication — optional token for GET routes (public deploy hardening)
+- [ ] CORS configuration — restrict allowed origins
+- [ ] Rate limiting — per-IP request throttling
+- [ ] HTTPS — native TLS or reverse proxy guide
+- [ ] Token rotation — `lucy rotate-token` command
+- [ ] Access logging — IP, timestamp, route, status code
 
 ## Philosophy
 
