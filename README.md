@@ -33,6 +33,32 @@ docker compose up
 Open `http://localhost:3004`. Empty.
 Say something to your AI.
 
+## Configuration
+
+Create a `.env` file in the project root:
+
+```
+ELASTIK_TOKEN=your-secret-token-here
+```
+
+This token is used for:
+
+- Authenticating all POST requests (X-Auth-Token header)
+- Plugin approval (X-Approve-Token header)
+- MCP server auto-injection
+
+If not set, a random token is generated on each restart.
+
+Docker reads from `.env` automatically. For MCP, add to Claude Desktop config:
+
+```json
+"env": {
+  "ELASTIK_TOKEN": "same-token-as-env-file"
+}
+```
+
+Never commit `.env` to git.
+
 ---
 
 ## What happens
@@ -253,7 +279,7 @@ It translates MCP calls to HTTP requests.
 It also serves as a security layer: the auth token is injected
 from an environment variable. AI uses the key without seeing it.
 
-When AI can send HTTP directly, MCP stays 
+When AI can send HTTP directly, MCP stays
 not as a translator, but as a token isolator.
 
 ---

@@ -5,7 +5,7 @@ import json, os, httpx
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("elastik")
-BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
+BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
 TOKEN = os.getenv("ELASTIK_TOKEN", "")
 
 @mcp.tool()
