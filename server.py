@@ -121,6 +121,8 @@ def load_plugins():
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
+    if '..' in path or '//' in path:
+        return await send_r(send, 400, '{"error":"invalid path"}')
     parts = [p for p in path.split("/") if p]
 
     base_path = path.split("?")[0]
