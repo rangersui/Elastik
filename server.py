@@ -4,7 +4,7 @@ from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
-TOKEN = secrets.token_hex(16)
+TOKEN = os.getenv("ELASTIK_TOKEN", "") or secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 PUBLIC = os.getenv("ELASTIK_PUBLIC", "").lower() in ("1", "true", "yes")
@@ -121,7 +121,8 @@ def load_plugins():
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
-    if '..' in path or '//' in path:
+    raw = scope.get("raw_path", b"").decode("utf-8", "replace")
+    if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
     parts = [p for p in path.split("/") if p]
 
