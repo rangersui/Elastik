@@ -356,4 +356,26 @@ elastik-vscode       → Lucy in every editor tab
 - [elastik-extension](https://github.com/rangersui/elastik-extension) — Chrome extension, DOM sync, domain blacklist
 - [elastik-vscode](https://github.com/rangersui/elastik-vscode) — VS Code extension, editor context sync, .elastikignore
 
+## Integrate anything
+
+Any language. Any app. One POST.
+```python
+import requests
+requests.post("http://localhost:3004/myworld/result",
+    data="your app data here",
+    headers={"X-Auth-Token": "your-token"})
+```
+```bash
+# Terminal
+echo "backup done" | curl -X POST -d @- -H "X-Auth-Token: t" localhost:3004/cron/result
+
+# Obsidian — on file save, POST note content
+# Slack — webhook forward to /webhook/slack
+# iOS — Shortcuts app, one HTTP action
+# Excel — VBA macro, one XMLHTTP call
+# Arduino — WiFi HTTP POST to /sensors/result
+...
+```
+
+If it can send HTTP, it's an elastik client.
 *Copyright © 2026 Ranger Chen . MIT License.*
