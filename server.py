@@ -10,7 +10,8 @@ PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text()
 OPENAPI = Path(__file__).with_name("openapi.json").read_text()
-CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'"
+SW = Path(__file__).with_name("sw.js").read_text()
+CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'; worker-src 'self'"
 _VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 _db = {}
 
@@ -104,15 +105,24 @@ async def app(scope, receive, send):
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
 
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
+    if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
     if method == "GET" and path == "/info":
         skills = ""
         sp = Path(__file__).with_name("SKILLS.md")
         if sp.exists(): skills = sp.read_text()
         auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
+        renderers, worlds = [], []
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    if d.name.startswith("renderer-"): renderers.append(d.name)
+                    else: worlds.append(d.name)
         return await send_r(send, 200, json.dumps({
             "routes": list(_plugins.keys()),
             "auth": auth_name,
             "plugins": _plugin_meta,
+            "renderers": renderers,
+            "worlds": worlds,
             "skills": skills,
         }))
     if method == "GET" and path == "/stages":

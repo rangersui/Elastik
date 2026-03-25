@@ -216,6 +216,157 @@ GET /info → {routes, auth, plugins: [{name, description, routes, params}], ski
 
 One request. Full capability map. No guessing.
 
+## Renderers — front-end plugins
+
+Renderers separate data from display.
+A renderer is a complete HTML page stored as a world.
+Data worlds declare which renderer to use on line one.
+
+### How it works
+
+1. A renderer is a world like `renderer-markdown` containing HTML+JS.
+2. A data world starts with `<!--use:renderer-markdown-->` on line one.
+3. index.html detects this → fetches the renderer → injects data → renders in iframe.
+4. No declaration → normal rendering. Zero change from before.
+
+### Using a renderer
+
+Write data with a renderer declaration:
+
+```
+POST /demo/write body:
+<!--use:renderer-markdown-->
+# My Notes
+- Item one
+- **Bold item**
+```
+
+Browser renders markdown. Not raw text.
+
+### Installing a renderer
+
+```
+python scripts/renderer.py install markdown
+```
+
+→ reads renderers/markdown.html → POST /renderer-markdown/write
+→ installed. One command.
+
+### Removing a renderer
+
+```
+python scripts/renderer.py remove markdown
+```
+
+→ POST /renderer-markdown/write with empty body
+→ gone. One command.
+
+### Listing renderers
+
+```
+python scripts/renderer.py list
+```
+
+→ shows installed + available
+
+### Writing a renderer
+
+A renderer is a complete HTML page. It reads data from `window.__ELASTIK_DATA__`.
+
+```html
+<!DOCTYPE html>
+<html><head></head><body>
+<div id="content"></div>
+<script type="module">
+  import { marked } from 'https://esm.sh/marked';
+  const data = window.__ELASTIK_DATA__ || '';
+  document.getElementById('content').innerHTML = marked.parse(data);
+</script>
+</body></html>
+```
+
+Use ESM imports from CDN. No npm. No build.
+Available CDNs: esm.sh, cdn.jsdelivr.net, unpkg.com, cdnjs.cloudflare.com.
+First load fetches from CDN. Service worker caches it. Second load is instant.
+
+### Renderer composability
+
+Renderers can fetch other worlds:
+
+```js
+const sensors = await fetch('/sensors/read').then(r=>r.json());
+const tasks = await fetch('/albon-tasks/read').then(r=>r.json());
+```
+
+One renderer → multiple data sources → one dashboard.
+Renderers can also fetch other renderers → sub-components.
+URL is the component. fetch is the import.
+
+### Defensive renderers
+
+Write renderers with tolerance for messy data:
+
+```js
+const battery = data.batt || data.battery || data.batteryLevel || 0;
+```
+
+Big model writes the renderer once (smart, tolerant).
+Small model writes data every time (simple, may have typos).
+
+### Available renderers (in renderers/ directory)
+
+- markdown.html — markdown to HTML via marked
+- json-tree.html — syntax highlighted JSON display
+
+Not installed by default. Use `scripts/renderer.py install <name>`.
+
+## Conventions (not rules)
+
+These are suggestions. The protocol treats all worlds equally.
+No special behavior in server.py for any of these names.
+
+- `/map` — world index. When managing many worlds, create this.
+  Read /map first when exploring. Update /map when creating worlds.
+- `renderer-*` — front-end renderers. Install via scripts/renderer.py.
+- `/config/*` — system configuration (future: MCP config in stage).
+- `/health` — system status. Small model patrol writes here.
+
+## AI dispatch — three layers
+
+Not all tasks need the smartest model.
+
+- Small local model (Ollama): router, patrol, typo fixes, simple writes. Free.
+- Large cloud model (Claude/GPT): complex analysis, renderer creation, architecture. Paid.
+- Convention: try small model first. Escalate when needed.
+
+Small model reads /map → knows the universe → routes requests.
+Small model patrols worlds → checks data format → fixes typos → reports to /health.
+Big model writes renderers → creates complex logic → one-time cost.
+
+## Navigation
+
+The user does not memorize URLs. You navigate for them.
+
+- "Show me sensors" → you know /sensors exists (from /map or /stages) → you route there.
+- "What do we have" → GET /stages or GET /map/read → summarize.
+- "Make a dashboard" → create /dashboard with `<!--use:renderer-dashboard-->` → fetch data from relevant worlds.
+
+Use pending_js for navigation:
+
+```
+POST /{name}/pending body: window.location='/{target}'
+```
+
+→ browser jumps. User sees new world.
+
+```
+stage_html  = what they see.
+pending_js  = what you tell the browser to do.
+js_result   = what the browser tells you happened.
+```
+
+Three mailboxes = complete control loop.
+
 ## MCP Aggregator
 
 If `mcp_servers.json` exists, external MCP servers are proxied.
