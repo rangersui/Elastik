@@ -44,24 +44,24 @@ GET  /{name}/read      → returns {stage_html, pending_js, js_result, version}
 POST /{name}/write     → overwrites stage_html → version++
 POST /{name}/append    → appends to stage_html → version++
 POST /{name}/sync      → overwrites stage_html → no version bump
-POST /{name}/pending   → writes to pending_js (clears js_result)
+POST /{name}/pending   → writes to pending_js
 POST /{name}/result    → writes to js_result
 POST /{name}/clear     → clears pending_js + js_result
 ```
 
 ## Authentication
 
-All POST routes require `X-Auth-Token` header except:
-- `/{name}/sync` — browser writes back DOM state
-- `/{name}/result` — browser writes back JS execution result  
-- `/{name}/clear` — browser clears pending after consumption
+Authentication is not part of the protocol. It is a plugin.
 
-These three are exempt because the browser cannot access the token.
-The token is printed in terminal at startup.
+Without auth plugin: all routes are open. Pure protocol.
+With `plugins/auth.py`: POST routes require `X-Auth-Token` header.
 
-GET routes are public. No token needed to read.
+- GET always open.
+- `sync`, `result`, `clear` exempt (browser needs these).
 
-Set `ELASTIK_PUBLIC=true` environment variable to skip all auth checks.
+The approve token is the only hardcoded security.
+It protects plugin installation. It is printed in the terminal.
+AI cannot approve its own proposals.
 
 ## Request limits
 
@@ -206,6 +206,23 @@ elastik-node           →  Node.js (future)
 elastik-go             →  Go (future)
 elastik-rust           →  Rust (future)
 ```
+
+## Self-describing API
+
+`GET /info` returns:
+- `routes` — all registered plugin routes
+- `auth` — which auth plugin is active
+- `plugins` — name, description, routes, params schema for each
+- `skills` — SKILLS.md content
+
+AI calls `GET /info` once. Knows all capabilities. No guessing.
+
+## MCP Aggregator
+
+`mcp_server.py` proxies configured MCP servers.
+`mcp_servers.json` lists servers to connect.
+Each server becomes one tool. Lazy connect on first call.
+AI sees one MCP entry point with all tools aggregated.
 
 ## That's it
 

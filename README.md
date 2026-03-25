@@ -261,7 +261,7 @@ git merge is the only approve button.
 ```
 server.py          ~100 lines    the protocol
 index.html         ~15 lines     one iframe, one polling loop
-mcp_server.py      ~20 lines     MCP-to-HTTP adapter (temporary)
+mcp_server.py      ~80 lines     MCP aggregator + HTTP adapter
 lucy.py            ~100 lines    CLI
 PROTOCOL.md                      formal spec
 SKILLS.md                        AI behavior guide
@@ -272,6 +272,50 @@ data/                            universes
 ~235 lines of code. One dependency: `uvicorn`.
 
 ---
+
+## MCP Aggregator
+
+elastik's MCP server is also an aggregator.
+Configure any MCP server in mcp_servers.json —
+elastik proxies all their tools through one entry point.
+
+```json
+{
+  "servers": {
+    "fs": {
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-filesystem", "/home"],
+      "description": "Filesystem: list, read, write files"
+    }
+  }
+}
+```
+
+AI sees one MCP server. Behind it, any number of tools.
+No config change in Claude Desktop. Just edit mcp_servers.json.
+
+## Three ways in
+
+```
+Claude  → MCP     → mcp_server.py → elastik
+ChatGPT → OpenAPI → openapi.json  → elastik
+Anyone  → curl    → HTTP POST     → elastik
+```
+
+Three protocols. One database. Zero lock-in.
+
+## Mobile
+
+iOS Shortcuts and Android Tasker can POST to elastik.
+No app needed. Your OS is the client.
+See scripts/MOBILE.md for setup guides.
+
+## Plugin system
+
+Plugins are .py files in plugins/. Auto-loaded at startup.
+Each plugin exports ROUTES, DESCRIPTION, and optional PARAMS_SCHEMA.
+`GET /info` returns all plugin metadata. AI reads once, knows everything.
+See plugins/PLUGIN_SPEC.md for the full specification.
 
 ## Connect AI
 

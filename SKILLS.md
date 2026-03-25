@@ -206,6 +206,23 @@ Any library with a CDN works in your strings. If the browser
 can load it, it works. You've seen them all in training.
 Use whatever fits.
 
+## Self-discovery
+
+Call `GET /info` to see all available plugins, routes, and params:
+
+```
+GET /info → {routes, auth, plugins: [{name, description, routes, params}], skills}
+```
+
+One request. Full capability map. No guessing.
+
+## MCP Aggregator
+
+If `mcp_servers.json` exists, external MCP servers are proxied.
+Each configured server becomes one tool (e.g. `fs`).
+Call: `fs(tool_name="read_file", arguments='{"path":"/etc/hosts"}')`
+Lazy connect on first call. No startup overhead.
+
 ## Protocol constraints
 
 - `connect-src 'self'` — browser can only fetch localhost
