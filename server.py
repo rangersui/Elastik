@@ -4,11 +4,10 @@ from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
-TOKEN = os.getenv("ELASTIK_TOKEN", "") or secrets.token_hex(16)
+APPROVE_TOKEN = os.getenv("ELASTIK_TOKEN", "") or secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
-PUBLIC = os.getenv("ELASTIK_PUBLIC", "").lower() in ("1", "true", "yes")
-MAX_BODY = 5 * 1024 * 1024  # 5MB
+MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text()
 OPENAPI = Path(__file__).with_name("openapi.json").read_text()
 CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'"
@@ -39,60 +38,15 @@ def log_event(name, etype, payload=None):
     prev = row["hmac"] if row else ""
     h = _hmac.new(KEY, (prev + p).encode(), hashlib.sha256).hexdigest()
     c.execute("INSERT INTO events(timestamp,event_type,payload,hmac,prev_hmac) VALUES(datetime('now'),?,?,?,?)",
-              (etype, p, h, prev))
-    c.commit()
+              (etype, p, h, prev)); c.commit()
 
-def apply_patch(html, ops):
-    """Apply a list of string operations to html. Returns (new_html, applied_count)."""
-    count = 0
-    for op in ops:
-        t = op.get("op")
-        if t == "insert":
-            pos = op.get("pos", 0)
-            pos = max(0, min(pos, len(html)))
-            html = html[:pos] + op.get("text", "") + html[pos:]
-            count += 1
-        elif t == "delete":
-            start = max(0, op.get("start", 0))
-            end = min(len(html), op.get("end", start))
-            html = html[:start] + html[end:]
-            count += 1
-        elif t == "replace":
-            find = op.get("find", "")
-            text = op.get("text", "")
-            n = op.get("count", 1)
-            if find:
-                html = html.replace(find, text, n)
-                count += 1
-        elif t == "replace_all":
-            find = op.get("find", "")
-            text = op.get("text", "")
-            if find:
-                html = html.replace(find, text)
-                count += 1
-        elif t == "slice":
-            start = op.get("start", 0)
-            end = op.get("end", len(html))
-            html = html[start:end]
-            count += 1
-        elif t == "prepend":
-            html = op.get("text", "") + html
-            count += 1
-        elif t == "regex_replace":
-            import re
-            pattern = op.get("pattern", "")
-            text = op.get("text", "")
-            n = op.get("count", 0)
-            if pattern:
-                html = re.sub(pattern, text, html, count=n)
-                count += 1
-    return html, count
-
-def check_auth(scope):
-    """Return True if request is authorized for writes."""
-    if PUBLIC: return True
-    tok = dict(scope.get("headers", [])).get(b"x-auth-token", b"").decode()
-    return tok == TOKEN
+def _extract(b, action):
+    if b.startswith("{") and action != "patch":
+        try:
+            p = json.loads(b)
+            return p.get("body") or p.get("content") or p.get("text") or b
+        except json.JSONDecodeError: pass
+    return b
 
 async def recv(receive):
     b = b""
@@ -101,21 +55,27 @@ async def recv(receive):
         if len(b) > MAX_BODY: raise ValueError("body too large")
         if not m.get("more_body"): return b
 
-async def send_r(send, status, data, ct="application/json", csp=False):
+async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
     h = [[b"content-type", ct.encode()]]
     if csp: h.append([b"content-security-policy", CSP.encode()])
+    if extra_headers: h.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
 
-_plugins = {}
+_plugins, _auth, _plugin_meta = {}, None, []
 def load_plugins():
+    global _auth
     if not PLUGINS.exists(): return
     for f in PLUGINS.glob("*.py"):
         if f.name.startswith("_"): continue
         try:
-            ns = {}; exec(f.read_text(), ns)
+            ns = {"conn": conn, "log_event": log_event}; exec(f.read_text(), ns)
+            routes = list(ns.get("ROUTES", {}).keys())
             for path, handler in ns.get("ROUTES", {}).items():
                 _plugins[path] = handler; print(f"  plugin: {path}")
+            if "AUTH_MIDDLEWARE" in ns:
+                _auth = ns["AUTH_MIDDLEWARE"]; print(f"  auth: {f.name}")
+            _plugin_meta.append({"name": f.stem, "description": ns.get("DESCRIPTION", ""), "routes": routes})
         except Exception as e: print(f"  plugin {f.name} error: {e}")
 
 async def app(scope, receive, send):
@@ -124,6 +84,8 @@ async def app(scope, receive, send):
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
+    if _auth and not await _auth(scope, path, method):
+        return await send_r(send, 403, '{"error":"unauthorized"}')
     parts = [p for p in path.split("/") if p]
 
     base_path = path.split("?")[0]
@@ -132,11 +94,25 @@ async def app(scope, receive, send):
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         result = await _plugins[base_path](method, b, params)
-        return await send_r(send, 200, json.dumps(result))
+        status = result.pop("_status", 200); redirect = result.pop("_redirect", None)
+        cookies = result.pop("_cookies", []); html_body = result.pop("_html", None)
+        extra_h = [[b"set-cookie", c.encode()] for c in cookies]
+        if redirect: extra_h.append([b"location", redirect.encode()]); status = 302
+        if html_body: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
+        return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
 
-    if method == "GET" and path == "/openapi.json":
-        return await send_r(send, 200, OPENAPI)
-
+    if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
+    if method == "GET" and path == "/info":
+        skills = ""
+        sp = Path(__file__).with_name("SKILLS.md")
+        if sp.exists(): skills = sp.read_text()
+        auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
+        return await send_r(send, 200, json.dumps({
+            "routes": list(_plugins.keys()),
+            "auth": auth_name,
+            "plugins": _plugin_meta,
+            "skills": skills,
+        }))
     if method == "GET" and path == "/stages":
         stages = []
         if DATA.exists():
@@ -147,7 +123,6 @@ async def app(scope, receive, send):
         return await send_r(send, 200, json.dumps(stages))
 
     if method == "POST" and len(parts) == 2 and parts[0] == "webhook":
-        if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         log_event("default", "webhook_received", {"source": parts[1], "body": b})
@@ -157,63 +132,40 @@ async def app(scope, receive, send):
         try: b = json.loads(await recv(receive))
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         if parts[1] == "propose":
-            if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
             log_event("default", "plugin_proposed", b)
             return await send_r(send, 200, '{"ok":true}')
         if parts[1] == "approve":
             tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
-            if tok != TOKEN: return await send_r(send, 403, '{"error":"invalid token"}')
+            if tok != APPROVE_TOKEN: return await send_r(send, 403, '{"error":"invalid token"}')
             n, code = b.get("name", ""), b.get("code", "")
             if n and code:
                 PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
                 log_event("default", "plugin_approved", {"name": n})
             return await send_r(send, 200, '{"ok":true}')
 
-    if len(parts) == 2 and parts[1] in ("read","write","append","patch","pending","result","clear","sync"):
+    if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
         name, action = parts
-        if not _VALID_NAME.match(name):
-            return await send_r(send, 400, '{"error":"invalid world name"}')
+        if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         c = conn(name)
         if method == "GET" and action == "read":
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
-        if action not in ("sync", "result", "clear") and not check_auth(scope):
-            return await send_r(send, 403, '{"error":"unauthorized"}')
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        # GPT Actions / any JSON client: extract string from wrapper
-        if b.startswith("{") and action != "patch":
-            try:
-                parsed = json.loads(b)
-                b = parsed.get("body") or parsed.get("content") or parsed.get("text") or b
-            except json.JSONDecodeError: pass
+        b = _extract(b, action)
         if action == "write":
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_written", {"len": len(b)})
-            v = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
-            return await send_r(send, 200, json.dumps({"version": v}))
+            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
         if action == "append":
             old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(old+b,)); c.commit()
             log_event(name, "stage_appended", {"len": len(b)})
-            v = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
-            return await send_r(send, 200, json.dumps({"version": v}))
-        if action == "patch":
-            try:
-                ops = json.loads(b).get("ops", [])
-            except json.JSONDecodeError:
-                return await send_r(send, 400, '{"error":"invalid JSON"}')
-            old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-            new_html, applied = apply_patch(old, ops)
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(new_html,)); c.commit()
-            log_event(name, "stage_patched", {"ops": len(ops), "applied": applied})
-            v = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
-            return await send_r(send, 200, json.dumps({"version": v, "applied": applied, "length": len(new_html)}))
+            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
         if action == "sync":
             c.execute("UPDATE stage_meta SET stage_html=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             return await send_r(send, 200, '{"ok":true}')
         if action == "pending":
-            print(f"PENDING: writing {b!r}", flush=True)
             c.execute("UPDATE stage_meta SET pending_js=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             return await send_r(send, 200, '{"ok":true}')
         if action == "result":
@@ -228,6 +180,5 @@ async def app(scope, receive, send):
 
 if __name__ == "__main__":
     load_plugins()
-    mode = "PUBLIC (no auth)" if PUBLIC else "AUTHENTICATED"
-    print(f"\n  elastik → http://{HOST}:{PORT}  [{mode}]\n  token: {TOKEN}\n")
+    print(f"\n  elastik → http://{HOST}:{PORT}\n  approve token: {APPROVE_TOKEN}\n")
     import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
