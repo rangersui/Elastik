@@ -2,13 +2,22 @@
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');
 const p=location.pathname.slice(1),o=location.origin;
 if(!p){fetch('/stages').then(r=>r.json()).then(d=>{document.body.innerHTML=d.map(s=>'<a href="/'+s.name+'">'+s.name+' (v'+s.version+')</a>').join('<br>')||'<em>no stages yet. say something to your AI.</em>'})}
-else{const f=document.createElement('iframe');f.sandbox='allow-scripts allow-same-origin allow-popups';
+else{const f=document.createElement('iframe');f.sandbox='allow-scripts allow-popups';
 f.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;border:none';document.body.appendChild(f);let v=-1;
-const csp='<meta http-equiv="Content-Security-Policy" content="default-src \'self\' '+o+' data: blob:; script-src \'unsafe-inline\' \'unsafe-eval\' https: data:; style-src \'unsafe-inline\' https: data:; img-src * data: blob:; font-src * data:; connect-src '+o+'">';
+const helper='<script>window.__elastik={_p:{},_w:"'+p+'",fetch:function(path){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"fetch",path:path,_id:id},"*")})},sync:function(d){window.parent.postMessage({_elastik:true,action:"sync",payload:d},"*")},result:function(d){window.parent.postMessage({_elastik:true,action:"result",payload:d},"*")},clear:function(){window.parent.postMessage({_elastik:true,action:"clear"},"*")}};window.addEventListener("message",function(e){if(e.data&&e.data._elastik_response&&e.data._id){var q=window.__elastik._p[e.data._id];if(q){delete window.__elastik._p[e.data._id];if(e.data.error)q.reject(new Error(e.data.error));else q.resolve(e.data.result)}}if(e.data&&e.data._elastik_exec){try{var r=eval(e.data.code);window.parent.postMessage({_elastik:true,action:"result",payload:String(r==null?"":r)},"*");window.parent.postMessage({_elastik:true,action:"clear"},"*")}catch(err){window.parent.postMessage({_elastik:true,action:"result",payload:"ERROR:"+err.message},"*");window.parent.postMessage({_elastik:true,action:"clear"},"*")}}})<\/script>';
+function injectHelper(html){if(html.includes('</head>'))return html.replace('</head>',helper+'</head>');if(html.includes('<body'))return html.replace(/<body[^>]*>/i,function(m){return m+helper});return helper+html}
+window.addEventListener('message',async function(e){
+if(!e.data||!e.data._elastik)return;
+const{action,_id,path,payload}=e.data;
+if(action==='fetch'){try{const r=await(await fetch(path)).json();f.contentWindow.postMessage({_elastik_response:true,_id,result:r},'*')}catch(err){f.contentWindow.postMessage({_elastik_response:true,_id,error:err.message},'*')}}
+else if(action==='sync'){fetch('/'+p+'/sync',{method:'POST',body:payload||''})}
+else if(action==='result'){fetch('/'+p+'/result',{method:'POST',body:payload||''})}
+else if(action==='clear'){fetch('/'+p+'/clear',{method:'POST'})}
+});
 setInterval(async()=>{const r=await(await fetch('/'+p+'/read')).json();
 if(r.version!==v){v=r.version;let html=r.stage_html,rendered=false;
 const um=/^<!--use:([a-zA-Z0-9_-]+)-->\n?([\s\S]*)/.exec(html);
-if(um){try{const rr=await(await fetch('/'+um[1]+'/read')).json();if(rr.stage_html){f.srcdoc=csp+rr.stage_html.replace('</head>','<script>window.__ELASTIK_DATA__='+JSON.stringify(um[2])+'<\/script></head>');rendered=true}}catch(e){console.error('Renderer:',e)}}
-if(!rendered)f.srcdoc=csp+html}
-if(r.pending_js){try{const x=f.contentWindow.eval(r.pending_js);fetch('/'+p+'/result',{method:'POST',body:String(x??'')})}catch(e){fetch('/'+p+'/result',{method:'POST',body:'ERROR:'+e.message})}fetch('/'+p+'/clear',{method:'POST'})}},1000)}
+if(um){try{const rr=await(await fetch('/'+um[1]+'/read')).json();if(rr.stage_html){f.srcdoc=injectHelper(rr.stage_html.replace('</head>','<script>window.__ELASTIK_DATA__='+JSON.stringify(um[2])+'<\/script></head>'));rendered=true}}catch(e){console.error('Renderer:',e)}}
+if(!rendered)f.srcdoc=injectHelper(html)}
+if(r.pending_js){f.contentWindow.postMessage({_elastik_exec:true,code:r.pending_js},'*')}},1000)}
 </script></body></html>

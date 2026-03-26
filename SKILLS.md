@@ -425,6 +425,37 @@ Each configured server becomes one tool (e.g. `fs`).
 Call: `fs(tool_name="read_file", arguments='{"path":"/etc/hosts"}')`
 Lazy connect on first call. No startup overhead.
 
+## Renderer Security (Figma model)
+
+Renderers run in an iframe without same-origin access.
+They cannot directly fetch localhost. They cannot escape the iframe.
+
+Use the injected `__elastik` helper instead of native fetch:
+
+```js
+// Read another world:
+const data = await __elastik.fetch('/sensors/read');
+
+// Sync data back:
+__elastik.sync(newContent);
+
+// Write JS result:
+__elastik.result(resultData);
+
+// Clear mailboxes:
+__elastik.clear();
+```
+
+`__elastik.fetch` only allows GET reads (proxied by index.html).
+`sync`/`result`/`clear` only operate on the current world.
+Cross-world writes are physically blocked.
+
+Do NOT use native `fetch()` in renderers. It will fail (null origin).
+Always use `__elastik.fetch()`.
+
+`pending_js` still works — index.html evals it in the iframe context.
+But the iframe cannot fetch on its own. Only through the helper.
+
 ## Protocol constraints
 
 - `connect-src 'self'` — browser can only fetch localhost
