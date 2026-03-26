@@ -125,8 +125,16 @@ Visit a path that doesn't exist → auto-created. Empty. Ready.
 5. Repeat.
 
 For quick changes: `POST /{name}/pending` with a small script string.
-The browser evals it. Result comes back in `GET /{name}/result`.
+The browser evals it. Result comes back in `js_result` field of `GET /{name}/read`.
 Much cheaper than rewriting the entire stage string.
+
+Execution rules:
+
+- Same pending string only executes once (client-side dedup).
+- To run again, write a different string (or append a comment).
+- AI reads js_result → done → writes new pending to overwrite old.
+- pending_js executes inside the iframe — it can access `__elastik` but cannot directly manipulate the parent page DOM.
+- Navigation is the exception: `window.location='/target'` is intercepted and forwarded to the parent page.
 
 ## What you write
 

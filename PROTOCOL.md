@@ -141,12 +141,15 @@ Tampering with any event breaks the chain.
 
 ## Security
 
-- iframe sandbox: allow-scripts allow-same-origin allow-popups
+- iframe sandbox: allow-scripts allow-popups (no allow-same-origin — null origin)
+- postMessage bus: iframe communicates with parent via __elastik helper
 - CSP: connect-src 'self' — browser can only fetch localhost
 - X-Auth-Token: all POST routes authenticated (except sync/result/clear)
-- Approve token: printed in terminal, required for plugin approval
+- Approve token: printed in terminal, required for plugin approval and hot plug
 - HMAC chain: immutable audit history
 - Body limit: 5MB max
+- Navigation: pending_js with window.location is intercepted and executed by parent page
+- Cross-world writes: physically blocked — sync/result/clear only affect current world
 - World names: alphanumeric, dash, underscore only
 - Three mailboxes are independent: writing pending does not clear result
 
