@@ -64,22 +64,64 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
 
 _plugins, _auth, _plugin_meta = {}, None, []
-def load_plugins():
+
+def load_plugin(name):
+    """Load or reload a single plugin by name."""
     global _auth
+    f = PLUGINS / f"{name}.py"
+    if not f.exists():
+        src = PLUGINS / "available" / f"{name}.py"
+        if src.exists():
+            PLUGINS.mkdir(exist_ok=True)
+            f.write_text(src.read_text())
+            print(f"  installed from available: {name}")
+        else:
+            print(f"  not found: {name}"); return
+    try:
+        ns = {"conn": conn, "log_event": log_event, "load_plugin": load_plugin,
+              "unload_plugin": unload_plugin, "_plugins": _plugins, "_plugin_meta": _plugin_meta}
+        exec(f.read_text(), ns)
+        # Remove old routes for this plugin
+        old = next((m for m in _plugin_meta if m["name"] == name), None)
+        if old:
+            for r in old["routes"]: _plugins.pop(r, None)
+            _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
+        # Register new routes
+        routes = list(ns.get("ROUTES", {}).keys())
+        for path, handler in ns.get("ROUTES", {}).items():
+            _plugins[path] = handler
+        if "AUTH_MIDDLEWARE" in ns: _auth = ns["AUTH_MIDDLEWARE"]
+        _plugin_meta.append({"name": name, "description": ns.get("DESCRIPTION", ""),
+            "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])})
+        print(f"  loaded: {name} ({routes})")
+    except Exception as e: print(f"  error loading {name}: {e}")
+
+def unload_plugin(name):
+    """Unload a plugin — remove its routes."""
+    global _auth
+    meta = next((m for m in _plugin_meta if m["name"] == name), None)
+    if not meta: print(f"  not loaded: {name}"); return
+    for r in meta["routes"]: _plugins.pop(r, None)
+    if name == "auth" or "auth" in meta.get("description", "").lower(): _auth = None
+    _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
+    print(f"  unloaded: {name}")
+
+
+def load_plugins():
+    """Load all plugins at startup. Install defaults if empty."""
+    installed = [f for f in PLUGINS.glob("*.py") if not f.name.startswith("_")] if PLUGINS.exists() else []
+    if not installed:
+        available = PLUGINS / "available"
+        if available.exists():
+            PLUGINS.mkdir(exist_ok=True)
+            for name in ["admin.py", "auth.py"]:
+                src = available / name
+                if src.exists():
+                    (PLUGINS / name).write_text(src.read_text())
+                    print(f"  installed default: {name}")
     if not PLUGINS.exists(): return
     for f in PLUGINS.glob("*.py"):
-        if f.name.startswith("_"): continue
-        try:
-            ns = {"conn": conn, "log_event": log_event}; exec(f.read_text(), ns)
-            routes = list(ns.get("ROUTES", {}).keys())
-            for path, handler in ns.get("ROUTES", {}).items():
-                _plugins[path] = handler; print(f"  plugin: {path}")
-            if "AUTH_MIDDLEWARE" in ns:
-                _auth = ns["AUTH_MIDDLEWARE"]; print(f"  auth: {f.name}")
-            meta = {"name": f.stem, "description": ns.get("DESCRIPTION", ""), "routes": routes,
-                    "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])}
-            _plugin_meta.append(meta)
-        except Exception as e: print(f"  plugin {f.name} error: {e}")
+        if not f.name.startswith("_"): load_plugin(f.stem)
 
 async def app(scope, receive, send):
     if scope["type"] != "http": return
@@ -152,6 +194,7 @@ async def app(scope, receive, send):
             n, code = b.get("name", ""), b.get("code", "")
             if n and code:
                 PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
+                load_plugin(n)
                 log_event("default", "plugin_approved", {"name": n})
             return await send_r(send, 200, '{"ok":true}')
 
