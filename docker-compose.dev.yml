@@ -9,3 +9,5 @@ services:
     volumes:
       - .:/elastik
     env_file: .env
+    environment:
+      - ELASTIK_PORT=3004
