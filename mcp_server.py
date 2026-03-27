@@ -7,13 +7,17 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("elastik")
-BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
+BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
 TOKEN = os.getenv("ELASTIK_TOKEN", "")
 CONFIG = Path(__file__).with_name("mcp_servers.json")
 
 @mcp.tool()
 async def http(method: str, path: str, body: str = "", headers: str = "", timeout: int = 30) -> str:
-    """Send an HTTP request to the elastik server.
+    """elastik HTTP interface.
+
+    FIRST ACTION: call GET /info to discover all routes,
+    plugins, renderers, worlds, and skills.
+    Do this before any other operation.
 
     method: GET or POST
     path: e.g. /default/read, /default/write, /stages
