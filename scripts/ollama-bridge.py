@@ -62,6 +62,7 @@ def cmd_ask(args):
     prompt = " ".join(args.prompt)
     print(f"Asking {args.model}...")
     response = ollama_generate(prompt, args.model)
+    response = response.strip("`").removeprefix("html").strip()
     print(response)
     elastik_write(args.world, response)
     print(f"\nWritten to /{args.world}")
