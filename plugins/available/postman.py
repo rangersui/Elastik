@@ -45,19 +45,24 @@ def _reload_config():
 
 # ── params schema ───────────────────────────────────────────────────────
 
-PARAMS_SCHEMA = {
-    "/proxy/postman": {
-        "method": "POST",
-        "params": {
-            "url": {"type": "string", "required": True, "description": "Full URL"},
-            "method": {"type": "string", "required": False, "description": "HTTP method (default GET)"},
-            "headers": {"type": "object", "required": False, "description": "Request headers"},
-            "body": {"type": "string", "required": False, "description": "Request body"},
+def _params_schema():
+    _reload_config()
+    return {
+        "/proxy/postman": {
+            "method": "POST",
+            "params": {
+                "url": {"type": "string", "required": True, "description": "Full URL"},
+                "method": {"type": "string", "required": False, "description": "HTTP method (default GET)"},
+                "headers": {"type": "object", "required": False, "description": "Request headers"},
+                "body": {"type": "string", "required": False, "description": "Request body"},
+            },
+            "example": {"url": "https://httpbin.org/get", "method": "GET"},
+            "returns": {"status": "int", "headers": "object", "body": "string", "container": "bool"},
+            "allowed_hosts": _config.get("hosts", []),
         },
-        "example": {"url": "https://httpbin.org/get", "method": "GET"},
-        "returns": {"status": "int", "headers": "object", "body": "string", "container": "bool"}
-    },
-}
+    }
+
+PARAMS_SCHEMA = _params_schema()
 
 # ── handler ─────────────────────────────────────────────────────────────
 
