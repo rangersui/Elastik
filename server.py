@@ -93,8 +93,8 @@ def load_plugin(name):
         PLUGINS.mkdir(exist_ok=True)
         f.write_text(src.read_text())
         print(f"  installed from available: {name}")
-        else:
-            print(f"  not found: {name}"); return
+    if not f.exists():
+        print(f"  not found: {name}"); return
     try:
         ns = {"__file__": str(f), "conn": conn, "log_event": log_event}
         if name == "admin":
