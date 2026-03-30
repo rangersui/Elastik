@@ -88,12 +88,11 @@ def load_plugin(name):
         print(f"  \u26a0 {name} blocked — bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
     global _auth
     f = PLUGINS / f"{name}.py"
-    if not f.exists():
-        src = PLUGINS / "available" / f"{name}.py"
-        if src.exists():
-            PLUGINS.mkdir(exist_ok=True)
-            f.write_text(src.read_text())
-            print(f"  installed from available: {name}")
+    src = PLUGINS / "available" / f"{name}.py"
+    if src.exists() and (not f.exists() or src.stat().st_mtime > f.stat().st_mtime):
+        PLUGINS.mkdir(exist_ok=True)
+        f.write_text(src.read_text())
+        print(f"  installed from available: {name}")
         else:
             print(f"  not found: {name}"); return
     try:
