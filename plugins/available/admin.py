@@ -1,11 +1,21 @@
 """Hot plug admin — load/unload/list plugins via HTTP.
 
 Install: lucy install admin
-Protected by auth middleware (requires X-Auth-Token).
+Self-checks approve token. Does NOT rely solely on auth middleware.
 """
+import os, hmac as _hmac
 
 DESCRIPTION = "Hot plug admin — load/unload/list plugins at runtime"
 ROUTES = {}
+
+def _check_approve(params):
+    """Defense-in-depth: admin checks approve token itself, not just middleware."""
+    approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+    if not approve: return True  # no token set
+    scope = params.get("_scope", {})
+    headers = dict(scope.get("headers", []))
+    tok = headers.get(b"x-approve-token", b"").decode()
+    return _hmac.compare_digest(tok, approve)
 
 PARAMS_SCHEMA = {
     "/admin/load": {
@@ -34,6 +44,8 @@ PARAMS_SCHEMA = {
 
 
 async def handle_load(method, body, params):
+    if not _check_approve(params):
+        return {"error": "unauthorized", "_status": 403}
     name = params.get("name", "")
     if not name and body:
         name = body.decode().strip() if isinstance(body, bytes) else body.strip()
@@ -44,6 +56,8 @@ async def handle_load(method, body, params):
 
 
 async def handle_unload(method, body, params):
+    if not _check_approve(params):
+        return {"error": "unauthorized", "_status": 403}
     name = params.get("name", "")
     if not name and body:
         name = body.decode().strip() if isinstance(body, bytes) else body.strip()

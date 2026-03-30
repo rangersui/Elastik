@@ -19,7 +19,7 @@ if env_file.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
-TOKEN = os.getenv("ELASTIK_TOKEN", "")
+TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "")
 
 def http(method, path):
     url = BASE + path

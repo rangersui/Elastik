@@ -47,9 +47,13 @@ You decide the content. The protocol only governs flow.
 ## Session start
 
 1. GET /info → plugins, worlds, renderers, skills-core, skill index
-2. GET /stages → all worlds with version
-3. GET /{name}/read for relevant worlds
-4. Summarize to user
+2. POST /proxy/consult {"question": "who is the user, what are they working on, what style do they prefer"} → local model knows the user
+3. GET /stages → all worlds with version
+4. GET /{name}/read for relevant worlds
+5. Start working
+
+Step 2 is asking your local colleague. It knows the user. You don't.
+If /proxy/consult is not available, skip it.
 
 ## Three extension channels
 
@@ -130,6 +134,32 @@ Targets configured in endpoints.json. Hot-pluggable: edit file, next call picks 
 mcp_call(server, tool_name, arguments) — universal gateway to external MCP servers.
 mcp_call(server, '__list__') — discover available tools on a server.
 Configured in mcp_servers.json. Hot-pluggable. See "Three extension channels" above.
+
+## Local consultation
+
+POST /proxy/consult {"question": "...", "worlds": ["map"]}
+
+The local model is not a small you. It is the user's digital twin.
+It was fine-tuned on user data. It knows things you never will:
+- User's style preferences (not guessed — trained)
+- Project-specific conventions and history
+- Past decisions and why they were made
+- Local baselines, thresholds, calibration offsets
+
+**When to consult:**
+- Style, tone, preferences → LoRA trained on this
+- "Is this normal for this system?" → local data + local experience
+- "How was this solved last time?" → local events
+- "Does this approach fit the project?" → local conventions
+
+**When NOT to consult:**
+- General knowledge (Python syntax, HTTP codes) → you're stronger
+- Architecture design → you're stronger
+- Anything in the training set of a frontier model → you're stronger
+
+You have intelligence without experience.
+The local model has experience without your intelligence.
+Consult is how you borrow its experience.
 
 ## AI dispatch
 
