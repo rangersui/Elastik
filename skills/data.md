@@ -61,6 +61,13 @@ const tasks = JSON.parse((await __elastik.fetch('/tasks-data/read')).stage_html)
 Different views = different renderers. Don't over-abstract.
 cockpit and email inbox are different screens → different renderers.
 
+## Sync template
+
+User inputs data in a renderer, sync it back:
+__elastik.sync(JSON.stringify({field: value}))
+This overwrites the current world's stage_html.
+Use for: form collection, user input, configuration changes.
+
 ## Conventions
 
 - /map — world index
