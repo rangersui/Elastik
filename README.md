@@ -173,6 +173,38 @@ Nobody told it to. It chose to.
 
 ---
 
+## Agent Modes
+
+elastik doesn't limit what AI can do. It limits what AI can become.
+
+**Mode 0 — Read Only** (no tokens)
+AI can GET any world. Cannot write. Cannot change anything.
+Use: monitoring dashboards, public displays.
+
+**Mode 1 — Executor** (`ELASTIK_TOKEN`)
+AI can read and write worlds. Use installed plugins.
+Cannot install new plugins. Cannot change its own capabilities.
+Use: daily work. AI is a tool. You control the toolbox.
+
+**Mode 2 — Autonomous** (`ELASTIK_APPROVE_TOKEN`)
+AI can install plugins, change its own capabilities, self-evolve.
+With fs + exec plugins: full machine access.
+Use: trusted automation. AI is an agent. You set boundaries.
+
+Auth token controls actions.
+Approve token controls evolution.
+You choose the mode.
+
+```
+Other agent frameworks: only Mode 2 → must trust AI
+Other tools:            only Mode 1 → AI can't evolve
+Other dashboards:       only Mode 0 → AI can't act
+
+elastik: all three. You pick.
+```
+
+---
+
 ## Security
 
 All physical. None semantic.
@@ -211,6 +243,17 @@ The same security principle that protects web servers from malicious browsers.
 
 AI proposes. Human approves.
 If elastik destroys the world, a human handed over the key.
+
+### Physics, not policy
+
+Before v1.8.0, auth token and approve token were the same value.
+AI was told "you don't have the approve token." It believed it.
+It could have tried at any time. It never did. That's not security.
+
+Now they are physically different. AI cannot approve because the
+token it holds is the wrong key. Not "shouldn't." **Can't.**
+
+One env var. From prompt engineering to infrastructure.
 
 ### Server hardening
 
