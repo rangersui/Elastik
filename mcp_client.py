@@ -37,13 +37,15 @@ class MCPClient:
         self.close()
 
     def _start(self):
+        use_shell = sys.platform == "win32"
+        cmd = " ".join([self.cmd] + self.args) if use_shell else [self.cmd] + self.args
         self._proc = subprocess.Popen(
-            [self.cmd] + self.args,
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=self.env,
-            shell=(sys.platform == "win32"),
+            shell=use_shell,
         )
 
     def _next_id(self):

@@ -6,10 +6,11 @@ Handler signature: async def handler(method, body, params) -> dict
 """
 
 import os
+from pathlib import Path
 
 DESCRIPTION = "File system access (read + write)"
 ROUTES = {}
-ALLOWED_DIRS = ["/elastik"]
+ALLOWED_DIRS = [str(Path(__file__).resolve().parents[2])]
 
 PARAMS_SCHEMA = {
     "/proxy/fs/list": {
@@ -44,7 +45,7 @@ async def handle_list(method, body, params):
     path = params.get("path", "")
     if not path: return {"error": "path parameter required"}
     path = os.path.abspath(path)
-    if not any(path.startswith(d) for d in ALLOWED_DIRS):
+    if not any(Path(path).resolve().is_relative_to(Path(d).resolve()) for d in ALLOWED_DIRS):
         return {"error": "path not in allowed directories", "allowed": ALLOWED_DIRS}
     if not os.path.isdir(path): return {"error": "not a directory"}
     entries = []
@@ -59,7 +60,7 @@ async def handle_read(method, body, params):
     path = params.get("path", "")
     if not path: return {"error": "path parameter required"}
     path = os.path.abspath(path)
-    if not any(path.startswith(d) for d in ALLOWED_DIRS):
+    if not any(Path(path).resolve().is_relative_to(Path(d).resolve()) for d in ALLOWED_DIRS):
         return {"error": "path not in allowed directories", "allowed": ALLOWED_DIRS}
     if not os.path.isfile(path): return {"error": "not a file"}
     size = os.path.getsize(path)
@@ -73,7 +74,7 @@ async def handle_write(method, body, params):
     path = params.get("path", "")
     if not path: return {"error": "path parameter required"}
     path = os.path.abspath(path)
-    if not any(path.startswith(d) for d in ALLOWED_DIRS):
+    if not any(Path(path).resolve().is_relative_to(Path(d).resolve()) for d in ALLOWED_DIRS):
         return {"error": "path not in allowed directories"}
     content = body.decode("utf-8") if isinstance(body, bytes) else body
     with open(path, "w", encoding="utf-8") as f: f.write(content)

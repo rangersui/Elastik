@@ -4,7 +4,8 @@ from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
-APPROVE_TOKEN = os.getenv("ELASTIK_TOKEN", "") or secrets.token_hex(16)
+AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
+APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "") or secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
@@ -327,5 +328,7 @@ async def app(scope, receive, send):
 
 if __name__ == "__main__":
     load_plugins()
-    print(f"\n  elastik → http://{HOST}:{PORT}\n  approve token: {APPROVE_TOKEN}\n")
+    print(f"\n  elastik → http://{HOST}:{PORT}")
+    print(f"  auth token:    {'(not set — public mode)' if not AUTH_TOKEN else AUTH_TOKEN}")
+    print(f"  approve token: {APPROVE_TOKEN}\n")
     import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

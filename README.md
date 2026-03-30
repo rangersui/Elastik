@@ -22,16 +22,43 @@ See PROTOCOL.md for the formal specification.
 
 ## Install
 
-pip install -r requirements.txt
+**Windows** — double-click `install.cmd`
 
+**macOS / Linux** — open terminal:
+```bash
+./install.sh
+```
+
+That's it. The installer does three things:
+1. Installs Python dependencies
+2. Configures Claude Desktop to connect to elastik
+3. Starts the server
+
+Restart Claude Desktop. Say something. The wall responds.
+
+**Supported AI clients:**
+- **Claude Desktop** — one-click, installer handles everything
+- **Any MCP client** (Cursor, Windsurf, Claude Code, etc.) — point to `mcp_server.py`
+- **ChatGPT** — via OpenAPI schema, requires public URL (GPT Actions call from OpenAI's servers)
+- **Everything else** (Gemini, Ollama, your own agent) — just POST and GET, see [Integrate anything](#integrate-anything)
+
+<details>
+<summary>Manual install</summary>
+
+```bash
+pip install -r requirements.txt
 python server.py
+```
 
 Or with Docker:
 
+```bash
 docker compose up
+```
 
-Open `http://localhost:3004`. Empty.
-Say something to your AI.
+Open `http://localhost:3004`. Empty. Say something to your AI.
+
+</details>
 
 ## Configuration
 
