@@ -1,5 +1,12 @@
 data/
 .git/
+.claude/
 __pycache__/
 *.pyc
 .venv/
+models/
+llama.cpp/
+llama-cpp-src/
+results/
+claude_output/
+*.gguf
