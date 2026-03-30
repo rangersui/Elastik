@@ -352,24 +352,43 @@ data/                            universes
 
 ## MCP Aggregator
 
-elastik's MCP server is also an aggregator.
-Configure any MCP server in mcp_servers.json —
+elastik is both an MCP server and an MCP consumer.
+
+**Consuming:** Configure any MCP server in `mcp_servers.json` —
 elastik proxies all their tools through one entry point.
 
 ```json
 {
   "servers": {
-    "fs": {
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "/home"],
-      "description": "Filesystem: list, read, write files"
+    "docker": {
+      "command": "docker",
+      "args": ["ai", "mcp-server"],
+      "description": "Docker: containers, images, logs"
     }
   }
 }
 ```
 
 AI sees one MCP server. Behind it, any number of tools.
-No config change in Claude Desktop. Just edit mcp_servers.json.
+Docker, Chrome, filesystem, email — all through `mcp_call`.
+No config change in Claude Desktop. Just edit `mcp_servers.json`.
+
+**Serving:** `mcp_server.py` exposes elastik as an MCP server.
+Any AI that speaks MCP can connect — no need to learn the elastik protocol.
+
+**Federation:** Two elastik instances can add each other to `mcp_servers.json`.
+Each node keeps its own `universe.db`, its own approve token, its own plugins.
+Capabilities are shared. Sovereignty is not.
+
+```
+Home elastik ←→ Office elastik ←→ Cloud elastik
+     ↕               ↕               ↕
+Home Ollama     Office Docker     Cloud DB
+Home Chrome     Office VS Code    Cloud API
+
+Each node: own data, own token, own rules.
+Between nodes: MCP protocol, capability sharing, zero trust.
+```
 
 ## Three ways in
 
@@ -471,12 +490,33 @@ Bitcoin 2008 — money without banks.
 elastik 2026 — intelligence and tools belong to you.
 ```
 
-We didn't invent anything. HTTP was already there. SQLite was already there. HMAC was already there. iframe was already there. AI was already there.
+We didn't invent anything. HTTP was already there. SQLite was already there.
+HMAC was already there. iframe was already there. AI was already there.
 
 We just removed everything else.
 
-An application-layer overlay network.
-Every protocol below is transparent transport.
+### End-to-end principle
+
+server.py doesn't understand the strings it carries.
+It doesn't parse HTML. It doesn't validate JSON. It doesn't judge content.
+It stores strings, signs strings, and serves strings. That's it.
+
+This is the same principle that made the internet win over telecom:
+the network is a dumb pipe, intelligence lives at the endpoints.
+
+```
+Telecom's mistake: smart network, dumb terminals.
+Internet's answer: dumb network, smart terminals.
+
+AI industry's mistake: smart API, dumb clients.
+elastik's answer:     dumb protocol, smart endpoints.
+```
+
+The AI company is the carrier. elastik is the app on top.
+The carrier collects thinner and thinner per-token fees.
+The app collects the user relationship and the data.
+
+server.py is dumb. That is its greatest strength.
 
 ---
 
