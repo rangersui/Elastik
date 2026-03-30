@@ -3,11 +3,14 @@
 Install: lucy install postman
 Requires approve token. Returns complete response including headers.
 
-Configure ALLOWED_HOSTS before use. Empty = block all.
+Config: postman.json (hot-pluggable, mtime pattern)
+  {"hosts": ["localhost", "127.0.0.1", "api.github.com"]}
+
+Fallback env: POSTMAN_HOSTS=localhost,127.0.0.1
 """
 
-import json
-import os
+import json, os, socket
+from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -15,9 +18,31 @@ from urllib.error import URLError, HTTPError
 DESCRIPTION = "Raw HTTP gateway — full headers, whitelist-only"
 ROUTES = {}
 
-# Comma-separated hostnames. Empty = block all.
-# e.g. POSTMAN_HOSTS=httpbin.org,api.github.com
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("POSTMAN_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+# ── hot-plug config ─────────────────────────────────────────────────────
+
+_CONFIG_FILE = Path(__file__).resolve().parents[2] / "postman.json"
+_config = {"hosts": []}
+_config_mtime = 0
+_in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+def _reload_config():
+    global _config_mtime
+    if not _CONFIG_FILE.exists():
+        if not _config["hosts"]:
+            _config["hosts"] = [h.strip() for h in os.getenv("POSTMAN_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+        return
+    try:
+        mt = _CONFIG_FILE.stat().st_mtime
+        if mt == _config_mtime:
+            return
+        _config_mtime = mt
+        data = json.loads(_CONFIG_FILE.read_text())
+        _config.clear()
+        _config["hosts"] = data.get("hosts", [])
+    except (json.JSONDecodeError, OSError):
+        pass
+
+# ── params schema ───────────────────────────────────────────────────────
 
 PARAMS_SCHEMA = {
     "/proxy/postman": {
@@ -29,21 +54,27 @@ PARAMS_SCHEMA = {
             "body": {"type": "string", "required": False, "description": "Request body"},
         },
         "example": {"url": "https://httpbin.org/get", "method": "GET"},
-        "returns": {"status": "int", "headers": "object", "body": "string"}
+        "returns": {"status": "int", "headers": "object", "body": "string", "container": "bool"}
     },
 }
 
+# ── handler ─────────────────────────────────────────────────────────────
 
 async def handle_postman(method, body, params):
+    _reload_config()
+
     b = json.loads(body) if body else {}
     url = params.get("url") or b.get("url", "")
     if not url:
-        return {"error": "url required"}
+        return {"error": "url required", "container": _in_container}
     host = urlparse(url).hostname or ""
-    if not ALLOWED_HOSTS:
-        return {"error": "no allowed hosts configured. Set POSTMAN_HOSTS env var"}
-    if host not in ALLOWED_HOSTS:
-        return {"error": f"host '{host}' not in whitelist", "allowed": ALLOWED_HOSTS}
+    if not _config["hosts"]:
+        return {"error": "no allowed hosts configured. Set postman.json or POSTMAN_HOSTS env var", "container": _in_container}
+    if host not in _config["hosts"]:
+        hint = ""
+        if _in_container and host in ("localhost", "127.0.0.1"):
+            hint = " (running in container — localhost points to the container, not the host. Use host.docker.internal instead)"
+        return {"error": f"host '{host}' not in whitelist{hint}", "allowed": _config["hosts"], "container": _in_container}
     req_method = (params.get("method") or b.get("method", "GET")).upper()
     req_headers = b.get("headers", {})
     req_body = (b.get("body") or "").encode("utf-8") or None
@@ -55,15 +86,17 @@ async def handle_postman(method, body, params):
             "status": r.status,
             "headers": dict(r.headers),
             "body": r.read().decode("utf-8", "replace"),
+            "container": _in_container,
         }
     except HTTPError as e:
         return {
             "status": e.code,
             "headers": dict(e.headers),
             "body": e.read().decode("utf-8", "replace"),
+            "container": _in_container,
         }
     except URLError as e:
-        return {"error": str(e.reason)}
+        return {"error": str(e.reason), "container": _in_container}
 
 
 ROUTES["/proxy/postman"] = handle_postman

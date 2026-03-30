@@ -62,25 +62,27 @@ Open `http://localhost:3004`. Empty. Say something to your AI.
 
 ## Configuration
 
-Create a `.env` file in the project root:
+Create a `.env` file (copy from `.env.example`):
 
 ```
-ELASTIK_TOKEN=your-secret-token-here
+ELASTIK_TOKEN=your-auth-token
+ELASTIK_APPROVE_TOKEN=your-approve-token
 ```
 
-This token is used for:
+Two tokens, two purposes:
 
-- Authenticating all POST requests (X-Auth-Token header)
-- Plugin approval (X-Approve-Token header)
-- MCP server auto-injection
+| Token | Header | Who has it | What it does |
+|-------|--------|-----------|--------------|
+| `ELASTIK_TOKEN` | `X-Auth-Token` | AI (via MCP env) | Read/write worlds, use plugins |
+| `ELASTIK_APPROVE_TOKEN` | `X-Approve-Token` | Human only (terminal) | Install plugins, admin operations |
 
-If not set, a random token is generated on each restart.
-
-Docker reads from `.env` automatically. For MCP, add to Claude Desktop config:
+AI gets the auth token through MCP config. It never sees the approve token.
+If `ELASTIK_APPROVE_TOKEN` is not set, a random one is generated and printed at startup.
 
 ```json
+// Claude Desktop MCP config — only auth token
 "env": {
-  "ELASTIK_TOKEN": "same-token-as-env-file"
+  "ELASTIK_TOKEN": "your-auth-token"
 }
 ```
 
@@ -255,31 +257,43 @@ token it holds is the wrong key. Not "shouldn't." **Can't.**
 
 One env var. From prompt engineering to infrastructure.
 
+### Container vs bare metal
+
+Docker is a wall. Without it, dangerous plugins run on your actual machine.
+
+```
+Container:   exec, fs load normally — isolation protects you
+Bare metal:  exec, fs blocked at load time — no override available to AI
+```
+
+To override on bare metal (you know what you're doing):
+```
+ELASTIK_ALLOW_DANGEROUS=1
+```
+
+This is checked in `load_plugin()`. Not middleware, not a prompt.
+Approve token can't override it. It's above the token system.
+
+### Permission hierarchy
+
+Four levels. Each is a physical gate, not a rule.
+
+```
+Constitution:  IN_CONTAINER check    — highest — nobody bypasses
+Seal:          ELASTIK_APPROVE_TOKEN — human only — admin, plugin install
+Badge:         ELASTIK_TOKEN         — AI has this — daily read/write
+Public:        GET requests          — no token — anyone
+```
+
 ### Server hardening
 
-All POST routes require **`X-Auth-Token`** header (printed at startup)
-
-GET routes are public (read-only)
-Request body capped at 5MB
-World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal
-Set **`ELASTIK_PUBLIC=true`** to skip auth (local dev only)
-
-**Approve token** — printed in terminal. AI doesn't have it.
-
-**HMAC chain** — every action logged, immutable.
-
-The LLM itself is an untrusted HTTP client.
-
-The same secruity principle that protects web servers from malicious broswers.
-
-The safety rule the web has followed for 30 years.
-
-LLM is just another client.
-
-NO new AI safety methods needed.
+All POST routes require **`X-Auth-Token`** header (printed at startup).
+Admin routes self-check **`X-Approve-Token`** (defense-in-depth, not just middleware).
+GET routes are public (read-only).
+Request body capped at 5MB.
+World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal.
 
 AI proposes. Human approves. If elastik destroys the world,
-
 a human handed over the key.
 
 ## Plugins

@@ -8,6 +8,8 @@ AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
 APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "") or secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
+IN_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv") or os.getenv("CONTAINER") == "1"
+_DANGEROUS_PLUGINS = {"exec", "fs"}
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text()
 OPENAPI = Path(__file__).with_name("openapi.json").read_text()
@@ -82,6 +84,8 @@ def load_plugin(name):
     """Load or reload a single plugin by name."""
     if not _VALID_NAME.match(name):
         print(f"  rejected invalid plugin name: {name}"); return
+    if name in _DANGEROUS_PLUGINS and not IN_CONTAINER and not os.getenv("ELASTIK_ALLOW_DANGEROUS"):
+        print(f"  \u26a0 {name} blocked — bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
     global _auth
     f = PLUGINS / f"{name}.py"
     if not f.exists():
@@ -93,8 +97,10 @@ def load_plugin(name):
         else:
             print(f"  not found: {name}"); return
     try:
-        ns = {"conn": conn, "log_event": log_event, "load_plugin": load_plugin,
-              "unload_plugin": unload_plugin, "_plugins": _plugins, "_plugin_meta": _plugin_meta}
+        ns = {"__file__": str(f), "conn": conn, "log_event": log_event}
+        if name == "admin":
+            ns.update({"load_plugin": load_plugin, "unload_plugin": unload_plugin,
+                        "_plugins": _plugins, "_plugin_meta": _plugin_meta})
         exec(f.read_text(), ns)
         # Remove old routes for this plugin
         old = next((m for m in _plugin_meta if m["name"] == name), None)
@@ -195,6 +201,7 @@ async def app(scope, receive, send):
         b = await recv(receive)
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        params["_scope"] = scope
         result = await _plugins[base_path](method, b, params)
         status = result.pop("_status", 200); redirect = result.pop("_redirect", None)
         cookies = result.pop("_cookies", []); html_body = result.pop("_html", None)
@@ -333,7 +340,12 @@ if __name__ == "__main__":
         print("\n  ⚠ ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")
         sys.exit(1)
-    print(f"\n  elastik → http://{HOST}:{PORT}")
+    mode = "container" if IN_CONTAINER else "bare metal"
+    print(f"\n  elastik → http://{HOST}:{PORT}  [{mode}]")
     print(f"  auth token:    {AUTH_TOKEN}")
-    print(f"  approve token: {APPROVE_TOKEN}\n")
+    print(f"  approve token: {APPROVE_TOKEN}")
+    if not IN_CONTAINER:
+        print(f"  \u26a0 bare metal — dangerous plugins ({', '.join(_DANGEROUS_PLUGINS)}) blocked")
+        if os.getenv("ELASTIK_ALLOW_DANGEROUS"): print(f"  \u26a0 ELASTIK_ALLOW_DANGEROUS override active")
+    print()
     import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
