@@ -505,9 +505,9 @@ elastik-vscode       → Lucy in every editor tab
 See `scripts/ollama-bridge.py` for local LLM integration.
 
 ```bash
-python scripts/ollama-bridge.py ask "draw a blue hello world" --world default
-python scripts/ollama-bridge.py chat --world default
-python scripts/ollama-bridge.py watch --world default
+python scripts/ollama-bridge.py "draw a blue hello world"   # one-shot
+python scripts/ollama-bridge.py --world work                # target a world
+python scripts/ollama-bridge.py --watch                     # loop on changes
 ```
 
 ## Integrate anything
