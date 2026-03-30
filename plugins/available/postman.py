@@ -20,7 +20,7 @@ ROUTES = {}
 
 # ── hot-plug config ─────────────────────────────────────────────────────
 
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "postman.json"
+_CONFIG_FILE = _ROOT / "postman.json"
 _config = {"hosts": []}
 _config_mtime = 0
 _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")

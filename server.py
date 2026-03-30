@@ -96,7 +96,7 @@ def load_plugin(name):
     if not f.exists():
         print(f"  not found: {name}"); return
     try:
-        ns = {"__file__": str(f), "conn": conn, "log_event": log_event}
+        ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent, "conn": conn, "log_event": log_event}
         if name == "admin":
             ns.update({"load_plugin": load_plugin, "unload_plugin": unload_plugin,
                         "_plugins": _plugins, "_plugin_meta": _plugin_meta})

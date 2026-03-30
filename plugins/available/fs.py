@@ -10,7 +10,7 @@ from pathlib import Path
 
 DESCRIPTION = "File system access (read + write)"
 ROUTES = {}
-ALLOWED_DIRS = [str(Path(__file__).resolve().parents[2])]
+ALLOWED_DIRS = [str(_ROOT)]
 
 PARAMS_SCHEMA = {
     "/proxy/fs/list": {

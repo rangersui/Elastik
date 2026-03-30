@@ -27,7 +27,7 @@ ROUTES = {}
 
 # ── hot-plug config ─────────────────────────────────────────────────────
 
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "consult.json"
+_CONFIG_FILE = _ROOT / "consult.json"
 _config = {}
 _config_mtime = 0
 
@@ -99,7 +99,7 @@ async def handle_consult(method, body, params):
         selected = explicit_worlds
     else:
         # 1. Chief of staff selects worlds
-        data_dir = Path(__file__).resolve().parents[2] / "data"
+        data_dir = _ROOT / "data"
         all_worlds = []
         if data_dir.exists():
             all_worlds = [d.name for d in sorted(data_dir.iterdir())
