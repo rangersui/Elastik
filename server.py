@@ -1,5 +1,5 @@
 """elastik — reference implementation. ~350 lines."""
-import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys
+import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, time
 from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
@@ -79,6 +79,8 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
 
 _plugins, _auth, _plugin_meta = {}, None, []
+_cron_tasks = {}  # name → {interval, handler, last_run}
+_start_time = time.time()
 
 def load_plugin(name):
     """Load or reload a single plugin by name."""
@@ -102,12 +104,19 @@ def load_plugin(name):
             h = _plugins.get(route)
             if not h: return {"error": f"route {route} not found"}
             return await h(method, body, params or {})
+        _injectable = {
+            "load_plugin": load_plugin, "unload_plugin": unload_plugin,
+            "_plugins": _plugins, "_plugin_meta": _plugin_meta,
+            "_cron_tasks": _cron_tasks, "_start_time": _start_time,
+        }
         ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent,
               "conn": conn, "log_event": log_event, "_call": _call}
-        if name == "admin":
-            ns.update({"load_plugin": load_plugin, "unload_plugin": unload_plugin,
-                        "_plugins": _plugins, "_plugin_meta": _plugin_meta})
-        exec(f.read_text(), ns)
+        text = f.read_text()
+        needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', text)
+        if needs_match:
+            needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
+            ns.update({k: _injectable[k] for k in needed if k in _injectable})
+        exec(text, ns)
         # Remove old routes for this plugin
         old = next((m for m in _plugin_meta if m["name"] == name), None)
         if old:
@@ -127,6 +136,10 @@ def load_plugin(name):
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
             c.commit()
             print(f"  skill: skills-{name.replace('_', '-')}")
+        # Auto-register cron task
+        if "CRON" in ns and "CRON_HANDLER" in ns:
+            _cron_tasks[name] = {"interval": int(ns["CRON"]), "handler": ns["CRON_HANDLER"], "last_run": time.time()}
+            print(f"  cron: {name} every {ns['CRON']}s")
         print(f"  loaded: {name} ({routes})")
     except Exception as e: print(f"  error loading {name}: {e}")
 
@@ -147,6 +160,7 @@ def unload_plugin(name):
             c.commit()
             print(f"  skill cleared: {skill_world}")
     except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
+    _cron_tasks.pop(name, None)
     _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
     print(f"  unloaded: {name}")
 
@@ -341,8 +355,24 @@ async def app(scope, receive, send):
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
 
+def _sync_dir(directory, glob_pattern, world_name_fn, label):
+    """Sync files from a directory to worlds. Only writes if content changed."""
+    d = Path(__file__).resolve().parent / directory
+    if not d.exists(): return
+    for f in sorted(d.glob(glob_pattern)):
+        name = world_name_fn(f)
+        content = f.read_text(encoding="utf-8")
+        c = conn(name)
+        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        if old["stage_html"] != content:
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
+            c.commit()
+            print(f"  {label}: synced {name}")
+
 if __name__ == "__main__":
     load_plugins()
+    _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
+    _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
     if not AUTH_TOKEN:
         print("\n  ⚠ ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")
@@ -355,4 +385,21 @@ if __name__ == "__main__":
         print(f"  \u26a0 bare metal — dangerous plugins ({', '.join(_DANGEROUS_PLUGINS)}) blocked")
         if os.getenv("ELASTIK_ALLOW_DANGEROUS"): print(f"  \u26a0 ELASTIK_ALLOW_DANGEROUS override active")
     print()
-    import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    async def _cron_loop():
+        while True:
+            await asyncio.sleep(1)
+            now = time.time()
+            for name, task in list(_cron_tasks.items()):
+                if now - task["last_run"] >= task["interval"]:
+                    try:
+                        await task["handler"]()
+                        task["last_run"] = now
+                    except Exception as e:
+                        print(f"  cron {name}: {e}")
+
+    async def _serve():
+        config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
+        server = uvicorn.Server(config)
+        await asyncio.gather(server.serve(), _cron_loop())
+
+    import uvicorn; asyncio.run(_serve())

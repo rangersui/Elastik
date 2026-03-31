@@ -6,6 +6,7 @@ Self-checks approve token. Does NOT rely solely on auth middleware.
 import os, json, hmac as _hmac
 
 DESCRIPTION = "Hot plug admin — load/unload/list plugins at runtime"
+NEEDS = ["load_plugin", "unload_plugin", "_plugins", "_plugin_meta"]
 ROUTES = {}
 
 def _check_approve(params):

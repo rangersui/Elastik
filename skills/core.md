@@ -82,23 +82,28 @@ Decision:
 
 ## Plugin spec
 
-A plugin is a single .py file. Not a project.
+A plugin is a single .py file. Not a project. A microkernel user-space module.
 
 Required: DESCRIPTION, ROUTES dict, async handler functions.
   Handler signature: async def handler(method, body, params) -> dict
-  Server injects: conn(), log_event(), load_plugin(), unload_plugin()
-Optional: PARAMS_SCHEMA, OPS_SCHEMA, SKILL (auto-creates skill world on load).
-Forbidden: frameworks (FastAPI/Flask/Django), external servers, standalone processes.
+  Server injects: conn(), log_event(), _call(), load_plugin(), unload_plugin()
 
-A plugin runs inside server.py's process.
-It is a collection of functions, not an independent application.
-Zero extra dependencies preferred. Use stdlib when stdlib is enough.
+Optional:
+  PARAMS_SCHEMA  — parameter docs, shown in /info
+  OPS_SCHEMA     — operation docs
+  SKILL          — auto-creates skills-{name} world on load
+  CRON           — interval in seconds, auto-registers scheduled task on load
+  CRON_HANDLER   — async function called on schedule
+  NEEDS          — capability declaration (future: minimal injection)
+
+Forbidden: frameworks, external servers, standalone processes.
 
 Handler returns a dict. server.py handles the rest.
 Special fields: _status (HTTP code, default 200), _redirect (URL), _html (return HTML not JSON), _cookies (set cookies).
-Most handlers just return a plain dict.
 
-A plugin is an organ, not an organism. Organs run inside the body.
+A plugin is an organ, not an organism.
+Approve one plugin = gain code + routes + whitelist + skill doc + scheduled task.
+Unload one plugin = lose all of the above. Zero residue.
 
 ## Navigation
 
