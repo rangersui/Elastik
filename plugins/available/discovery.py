@@ -35,9 +35,13 @@ def _broadcast():
     # Primary: multicast
     try: _sock.sendto(msg, (_MCAST_GROUP, _PORT))
     except OSError: pass
-    # Fallback: broadcast (in case multicast doesn't work)
+    # Fallback: broadcast
     try: _sock.sendto(msg, ("255.255.255.255", _PORT))
     except OSError: pass
+    # Unicast reply to known peers (iOS can't send multicast)
+    for ip in list(_peers):
+        try: _sock.sendto(msg, (ip, _PORT))
+        except OSError: pass
 
 
 def _collect():
