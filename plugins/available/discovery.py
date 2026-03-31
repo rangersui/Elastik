@@ -41,13 +41,16 @@ def _broadcast():
 
 
 def _collect():
-    """Read all pending datagrams from buffer."""
+    """Read all pending datagrams from buffer. Ignore self."""
     now = time.time()
     while True:
         try:
             data, addr = _sock.recvfrom(1024)
             peer = json.loads(data)
             ip = addr[0]
+            # Skip self
+            if peer.get("name") == _NODE and peer.get("port") == _APP_PORT:
+                continue
             _peers[ip] = {
                 "name": peer.get("name", "?"),
                 "port": peer.get("port", 3004),
