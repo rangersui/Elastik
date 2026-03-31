@@ -1,15 +1,15 @@
-"""Local network peer discovery -- UDP broadcast + subnet unicast on port 3006.
+"""Local network peer discovery -- multicast on 224.0.251.99:3006.
 
-Every 30s: broadcast self, subnet unicast sweep, collect peers, write to
-discovery world. Trust route: human clicks trust in renderer, writes to
-config-endpoints.
+Every 30s: multicast self, collect peers, write to discovery world.
+Trust route: human clicks trust in renderer, writes to config-endpoints.
 """
 import asyncio, json, os, socket, time
 
-DESCRIPTION = "Local network peer discovery (UDP broadcast + subnet scan)"
+DESCRIPTION = "Local network peer discovery (multicast + broadcast fallback)"
 CRON = 30
 ROUTES = {}
 
+_MCAST_GROUP = "224.0.251.99"
 _PORT = 3006
 _NODE = os.getenv("ELASTIK_NODE", socket.gethostname())
 _APP_PORT = int(os.getenv("ELASTIK_PORT", "3004"))
@@ -20,39 +20,24 @@ _sock = None
 def _init_socket():
     global _sock
     if _sock: return
-    _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    _sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     _sock.setblocking(False)
-    try: _sock.bind(("0.0.0.0", _PORT))
-    except OSError: pass  # port busy -- can still broadcast
-
-
-def _get_local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except OSError:
-        return None
+    _sock.bind(("0.0.0.0", _PORT))
+    # Join multicast group
+    group = socket.inet_aton(_MCAST_GROUP)
+    mreq = group + socket.inet_aton("0.0.0.0")
+    _sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
 
 def _broadcast():
     msg = json.dumps({"name": _NODE, "port": _APP_PORT, "v": "1.10"}).encode()
-    # Fast path: broadcast (works if router allows it)
+    # Primary: multicast
+    try: _sock.sendto(msg, (_MCAST_GROUP, _PORT))
+    except OSError: pass
+    # Fallback: broadcast (in case multicast doesn't work)
     try: _sock.sendto(msg, ("255.255.255.255", _PORT))
     except OSError: pass
-    # Fallback: subnet unicast sweep
-    my_ip = _get_local_ip()
-    if not my_ip: return
-    prefix = my_ip.rsplit(".", 1)[0]
-    for i in range(1, 255):
-        target = f"{prefix}.{i}"
-        if target != my_ip:
-            try: _sock.sendto(msg, (target, _PORT))
-            except OSError: pass
 
 
 def _collect():
