@@ -99,6 +99,8 @@ Create a `.env` file (copy from `.env.example`):
 ```
 ELASTIK_TOKEN=your-auth-token
 ELASTIK_APPROVE_TOKEN=your-approve-token
+ELASTIK_NODE=my-laptop              # optional: node name for discovery
+ELASTIK_PEERS=10.0.0.5,10.0.0.6    # optional: seed peers for containers/cloud
 ```
 
 Server auto-loads the first file found: `.env`, `_env`, `.env.local`.
@@ -371,17 +373,21 @@ git merge is the only approve button.
 ## Files
 
 ```
-server.py          ~350 lines    the protocol
+server.py          ~500 lines    the protocol
 index.html         ~25 lines     one iframe, one polling loop
 mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
 lucy.py            ~110 lines    CLI
+map.md                           world index (source of truth)
 PROTOCOL.md                      formal spec
 SKILLS.md                        AI behavior guide
 plugins/                         route extensions
+renderers/                       HTML renderers (synced at boot)
+skills/                          skill docs (synced at boot)
+scripts/                         deployment, backup, build tools
 data/                            universes
 ```
 
-~675 lines of code. Dependencies: `uvicorn`, `mcp`, `httpx`, `requests`.
+Zero-dependency mode: just `python server.py`. Optional: `uvicorn`, `mcp`.
 
 ---
 
@@ -426,6 +432,8 @@ See scripts/MOBILE.md for setup guides.
 
 Plugins are .py files in plugins/. Auto-loaded at startup.
 Each plugin exports ROUTES, DESCRIPTION, and optional PARAMS_SCHEMA.
+Plugins declare dependencies with `NEEDS = ["_plugin_meta", "_cron_tasks"]` —
+server injects only what's declared.
 `GET /info` returns all plugin metadata. AI reads once, knows everything.
 See plugins/PLUGIN_SPEC.md for the full specification.
 
@@ -534,6 +542,48 @@ elastik-vscode       → Lucy in every editor tab
 
 - [elastik-extension](https://github.com/rangersui/elastik-extension) — Chrome extension, DOM sync, domain blacklist
 - [elastik-vscode](https://github.com/rangersui/elastik-vscode) — VS Code extension, editor context sync, .elastikignore
+
+## Peer Discovery
+
+Nodes on the same network find each other automatically.
+
+```bash
+python lucy.py install discovery    # or: admin/load discovery
+```
+
+Three-layer discovery:
+
+| Layer | Method | Use case |
+|-------|--------|----------|
+| Multicast | UDP 224.0.251.99:3006 | Physical devices on same LAN |
+| Unicast reply | UDP to known peers | iOS (can't send multicast) |
+| Seed peers | `ELASTIK_PEERS=ip1,ip2` | Containers, cloud, cross-subnet |
+
+Gossip protocol: each node asks its peers who they know.
+Four nodes, two minutes, fully automatic mesh discovery.
+
+Browser dashboard at `/discovery` — shows direct peers (green)
+and gossip-discovered peers (blue) with "trust and connect" buttons.
+
+```
+ELASTIK_NODE=my-laptop         # node name (default: hostname)
+ELASTIK_PEERS=10.0.0.5,10.0.0.6  # seed peers for non-multicast environments
+```
+
+## Backup
+
+Dual-path data protection:
+
+```bash
+# Human path — zero tokens, crontab friendly
+python scripts/backup.py backup
+python scripts/backup.py restore latest
+
+# AI path — via plugin, costs tokens
+POST /proxy/backup/run
+```
+
+Daily auto-backup via CRON (plugin). 7-backup retention. WAL checkpoint before copy.
 
 ## Ollama bridge
 

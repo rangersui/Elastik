@@ -40,11 +40,17 @@ def _init_socket():
     _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     _sock.setblocking(False)
-    _sock.bind(("0.0.0.0", _PORT))
-    # Join multicast group
-    group = socket.inet_aton(_MCAST_GROUP)
-    mreq = group + socket.inet_aton("0.0.0.0")
-    _sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    try:
+        _sock.bind(("0.0.0.0", _PORT))
+    except OSError:
+        pass  # port busy — can still send unicast/seed
+    # Join multicast group (may fail if bind failed)
+    try:
+        group = socket.inet_aton(_MCAST_GROUP)
+        mreq = group + socket.inet_aton("0.0.0.0")
+        _sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except OSError:
+        pass
 
 
 def _broadcast():
@@ -74,8 +80,8 @@ def _collect():
             data, addr = _sock.recvfrom(1024)
             peer = json.loads(data)
             ip = addr[0]
-            # Skip self
-            if peer.get("name") == _NODE and peer.get("port") == _APP_PORT:
+            # Skip self (by name+port, not IP — Docker NAT changes source IP)
+            if peer.get("name") == _NODE and peer.get("port") == _APP_PORT and ip == _my_ip:
                 continue
             _peers[ip] = {
                 "name": peer.get("name", "?"),
