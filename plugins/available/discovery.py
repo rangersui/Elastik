@@ -1,11 +1,12 @@
-"""Local network peer discovery -- UDP broadcast on port 3006.
+"""Local network peer discovery -- UDP broadcast + subnet unicast on port 3006.
 
-Every 30s: broadcast self, collect peers, write to discovery world.
-Trust route: human clicks trust in renderer, writes to config-endpoints.
+Every 30s: broadcast self, subnet unicast sweep, collect peers, write to
+discovery world. Trust route: human clicks trust in renderer, writes to
+config-endpoints.
 """
 import asyncio, json, os, socket, time
 
-DESCRIPTION = "Local network peer discovery (UDP broadcast)"
+DESCRIPTION = "Local network peer discovery (UDP broadcast + subnet scan)"
 CRON = 30
 ROUTES = {}
 
@@ -27,10 +28,31 @@ def _init_socket():
     except OSError: pass  # port busy -- can still broadcast
 
 
+def _get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return None
+
+
 def _broadcast():
     msg = json.dumps({"name": _NODE, "port": _APP_PORT, "v": "1.10"}).encode()
+    # Fast path: broadcast (works if router allows it)
     try: _sock.sendto(msg, ("255.255.255.255", _PORT))
     except OSError: pass
+    # Fallback: subnet unicast sweep
+    my_ip = _get_local_ip()
+    if not my_ip: return
+    prefix = my_ip.rsplit(".", 1)[0]
+    for i in range(1, 255):
+        target = f"{prefix}.{i}"
+        if target != my_ip:
+            try: _sock.sendto(msg, (target, _PORT))
+            except OSError: pass
 
 
 def _collect():
