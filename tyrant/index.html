@@ -383,11 +383,6 @@ window.doAsk = async function() {
   }
 };
 
-// ─── TODO: FRONT-END PLUGINS ─────────────
-// 从plugin-* world读JS → eval注册能力
-// 前端版热插拔plugin
-// 补的时候在loadWorlds()之后加loadPlugins()
-
 // ─── INIT ────────────────────────────────────────────
 await loadWorlds();
 setInterval(loadWorlds, 10000);

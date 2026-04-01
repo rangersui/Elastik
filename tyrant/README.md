@@ -147,4 +147,4 @@ Three layers, fully independent, any combination. The protocol doesn't care who 
 - [ ] Navigate handler — iframe `window.location` interception
 - [ ] Action whitelist — front-end equivalent of config-actions
 - [ ] AI approve write — WebLLM generates → user confirms → writes to world
-- [ ] Front-end plugins — load JS from plugin-* worlds, hot-swap capabilities
+- [x] ~~Front-end plugins~~ — not needed. world = plugin. Write JS into a world, read it, eval it. That's it.
