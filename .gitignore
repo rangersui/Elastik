@@ -32,4 +32,5 @@ plugins/mcp_tools/
 
 llama-server/
 dist/
-backups/
+bus.crt
+bus.key
