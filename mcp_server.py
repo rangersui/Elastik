@@ -11,8 +11,9 @@ from urllib.error import URLError, HTTPError
 from pathlib import Path
 
 TOKEN = os.getenv("ELASTIK_TOKEN", "")
-CONFIG = Path(__file__).with_name("mcp_servers.json")
-ENDPOINTS = Path(__file__).with_name("endpoints.json")
+_CONF_DIR = Path(__file__).with_name("conf")
+CONFIG = _CONF_DIR / "mcp_servers.json"
+ENDPOINTS = _CONF_DIR / "endpoints.json"
 
 # -- HTTP endpoints hot-plug (same pattern as MCP hot-plug) --
 
@@ -58,6 +59,10 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
     h = {}
     if headers:
         h.update(json.loads(headers))
+    # strip approve token -- AI must never be able to send it
+    for k in list(h):
+        if k.lower() == "x-approve-token":
+            del h[k]
     if TOKEN:
         h["X-Auth-Token"] = TOKEN  # always last -- AI cannot override
     data = body.encode("utf-8") if body else None

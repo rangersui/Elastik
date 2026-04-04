@@ -3,7 +3,7 @@
 Install: lucy install postman
 Requires approve token. Returns complete response including headers.
 
-Config: postman.json (hot-pluggable, mtime pattern)
+Config: conf/postman.json (hot-pluggable, mtime pattern)
   {"hosts": ["localhost", "127.0.0.1", "api.github.com"]}
 
 Fallback env: POSTMAN_HOSTS=localhost,127.0.0.1
@@ -20,7 +20,7 @@ ROUTES = {}
 
 # ── hot-plug config ─────────────────────────────────────────────────────
 
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "postman.json"
+_CONFIG_FILE = Path(__file__).resolve().parents[2] / "conf" / "postman.json"
 _config = {"hosts": []}
 _config_mtime = 0
 _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")

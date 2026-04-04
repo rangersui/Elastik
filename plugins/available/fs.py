@@ -1,32 +1,44 @@
-"""File system plugin — access to allowed directories.
+"""Safe file system plugin — read anywhere, write to whitelisted dirs only.
 
-Install: lucy install fs
-Configure ALLOWED_DIRS before use.
 Handler signature: async def handler(method, body, params) -> dict
 """
 
-import os
+import os, json
 from pathlib import Path
 
-DESCRIPTION = "File system access (read + write)"
+DESCRIPTION = "Safe file system — read anywhere, write to data/backups only"
 ROUTES = {}
-ALLOWED_DIRS = [str(Path(__file__).resolve().parents[2])]
+
+# _ROOT is injected by server.py (project root). Don't compute from __file__.
+_CONF = _ROOT / "conf" / "fs.json"
+
+# defaults: empty — human opens dirs in conf/fs.json as needed
+_READ_DIRS = []
+_WRITE_DIRS = []
+_DENY_WRITE = ["*.py", "*.json", "*.env", "*.toml", "*.yaml", "*.yml", "*.sh"]
+
+def _load_conf():
+    global _READ_DIRS, _WRITE_DIRS, _DENY_WRITE
+    if _CONF.exists():
+        try:
+            c = json.loads(_CONF.read_text())
+            _READ_DIRS = [str((_ROOT / d).resolve()) for d in c.get("read_dirs", _READ_DIRS)]
+            _WRITE_DIRS = [str((_ROOT / d).resolve()) for d in c.get("write_dirs", ["data", "backups"])]
+            _DENY_WRITE = c.get("deny_write", _DENY_WRITE)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+_load_conf()
 
 PARAMS_SCHEMA = {
     "/proxy/fs/list": {
         "method": "POST",
-        "params": {
-            "path": {"type": "string", "required": False, "description": "Directory path, default '.'"}
-        },
-        "example": {"path": "./data"},
-        "returns": {"files": ["string"]}
+        "params": {"path": {"type": "string", "required": False, "description": "Directory path"}},
+        "returns": {"entries": ["object"]}
     },
     "/proxy/fs/read": {
         "method": "POST",
-        "params": {
-            "path": {"type": "string", "required": True, "description": "File path to read"}
-        },
-        "example": {"path": "server.py"},
+        "params": {"path": {"type": "string", "required": True, "description": "File path to read"}},
         "returns": {"content": "string"}
     },
     "/proxy/fs/write": {
@@ -35,28 +47,38 @@ PARAMS_SCHEMA = {
             "path": {"type": "string", "required": True, "description": "File path to write"},
             "content": {"type": "string", "required": True, "description": "File content"}
         },
-        "example": {"path": "test.txt", "content": "hello"},
         "returns": {"ok": "boolean"}
     },
 }
 
 
-def _safe_path(path):
-    """Resolve and validate path against ALLOWED_DIRS. Returns (resolved, error)."""
-    if not path: return None, "path parameter required"
+def _check_read(path):
+    if not path: return None, "path required"
     if "\x00" in path: return None, "invalid path"
-    resolved = str(Path(os.path.abspath(path)).resolve())
-    if not any(Path(resolved).is_relative_to(Path(d).resolve()) for d in ALLOWED_DIRS):
-        return None, "path not in allowed directories"
-    if Path(resolved).is_relative_to(Path(__file__).resolve().parents[1]):
-        return None, "plugins directory is restricted"
-    return resolved, None
+    resolved = Path(os.path.abspath(path)).resolve()
+    if not any(resolved.is_relative_to(Path(d).resolve()) for d in _READ_DIRS):
+        return None, f"path not in read dirs"
+    return str(resolved), None
+
+
+def _check_write(path):
+    if not path: return None, "path required"
+    if "\x00" in path: return None, "invalid path"
+    resolved = Path(os.path.abspath(path)).resolve()
+    # must be in write whitelist
+    if not any(resolved.is_relative_to(Path(d).resolve()) for d in _WRITE_DIRS):
+        return None, f"write not allowed here — only {_WRITE_DIRS}"
+    # deny patterns (no .py, .json, etc.)
+    import fnmatch
+    for pat in _DENY_WRITE:
+        if fnmatch.fnmatch(resolved.name, pat):
+            return None, f"file type blocked: {pat}"
+    return str(resolved), None
 
 
 async def handle_list(method, body, params):
-    path = params.get("path", "")
-    path, err = _safe_path(path)
-    if err: return {"error": err, "allowed": ALLOWED_DIRS}
+    path, err = _check_read(params.get("path", str(_ROOT)))
+    if err: return {"error": err}
     if not os.path.isdir(path): return {"error": "not a directory"}
     entries = []
     for name in sorted(os.listdir(path)):
@@ -67,9 +89,8 @@ async def handle_list(method, body, params):
 
 
 async def handle_read(method, body, params):
-    path = params.get("path", "")
-    path, err = _safe_path(path)
-    if err: return {"error": err, "allowed": ALLOWED_DIRS}
+    path, err = _check_read(params.get("path", ""))
+    if err: return {"error": err}
     if not os.path.isfile(path): return {"error": "not a file"}
     size = os.path.getsize(path)
     if size > 1_000_000: return {"error": "file too large", "size": size}
@@ -80,12 +101,13 @@ async def handle_read(method, body, params):
 
 
 async def handle_write(method, body, params):
-    path = params.get("path", "")
-    path, err = _safe_path(path)
+    path, err = _check_write(params.get("path", ""))
     if err: return {"error": err}
     content = body.decode("utf-8") if isinstance(body, bytes) else body
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f: f.write(content)
     return {"ok": True, "path": path, "size": len(content)}
+
 
 ROUTES["/proxy/fs/write"] = handle_write
 ROUTES["/proxy/fs/list"] = handle_list

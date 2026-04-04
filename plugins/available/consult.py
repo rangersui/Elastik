@@ -9,7 +9,7 @@ touches the filing cabinet.
 Pipeline:
   Claude (question) → chief of staff (select worlds) → advisor (think + answer)
 
-Config: consult.json (hot-pluggable, same mtime pattern as endpoints.json)
+Config: conf/consult.json (hot-pluggable, same mtime pattern as endpoints.json)
   {"advisor": "qwen3:8b", "chief": "qwen3:1.7b", "url": "http://localhost:11434"}
 
 Fallback env vars:
@@ -27,7 +27,7 @@ ROUTES = {}
 
 # ── hot-plug config ─────────────────────────────────────────────────────
 
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "consult.json"
+_CONFIG_FILE = Path(__file__).resolve().parents[2] / "conf" / "consult.json"
 _config = {}
 _config_mtime = 0
 
