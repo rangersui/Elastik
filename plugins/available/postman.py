@@ -9,7 +9,7 @@ Config: conf/postman.json (hot-pluggable, mtime pattern)
 Fallback env: POSTMAN_HOSTS=localhost,127.0.0.1
 """
 
-import json, os, socket
+import json, os, socket, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -82,16 +82,22 @@ async def handle_postman(method, body, params):
             hint = " (running in container — localhost points to the container, not the host. Use host.docker.internal instead)"
         return {"error": f"host '{host}' not in whitelist{hint}", "allowed": _config["hosts"], "container": _in_container}
     req_method = (params.get("method") or b.get("method", "GET")).upper()
+    if req_method != "GET":
+        return {"error": "postman is read-only (GET only)", "container": _in_container}
     req_headers = {k: v for k, v in b.get("headers", {}).items()
-                   if k.lower() != "x-approve-token"}
-    req_body = (b.get("body") or "").encode("utf-8") or None
+                   if k.lower() in ("accept", "user-agent", "authorization")}
 
-    req = Request(url, data=req_body, headers=req_headers, method=req_method)
+    # no-redirect handler — block SSRF via 302 bounce
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise HTTPError(newurl, code, f"redirect blocked: {newurl}", headers, fp)
+    opener = urllib.request.build_opener(_NoRedirect)
+
+    req = Request(url, headers=req_headers, method="GET")
     try:
-        r = urlopen(req, timeout=30)
+        r = opener.open(req, timeout=30)
         return {
             "status": r.status,
-            "headers": dict(r.headers),
             "body": r.read().decode("utf-8", "replace"),
             "container": _in_container,
         }
