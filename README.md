@@ -2,6 +2,12 @@
 
 Anything-to-UI. A protocol that turns any string into interface.
 
+The reference implementation uses HTTP. The protocol is transport-agnostic.
+
+HTTP, WebRTC, WebSocket, stdin/stdout, JSON-RPC...
+
+If it carries strings, it works.
+
 **E.L.A.S.T.I.K.**
 **Elastik Links All Strings Through Invisible Kernels**
 
@@ -13,11 +19,10 @@ This repo is a reference implementation in Python.
 
 Five rules. Any language can implement them.
 
-1. **Listen on a port.** Accept HTTP requests.
-2. **Send and receive strings over HTTP.** Nothing else. No types. No schemas.
-3. **Store strings in SQLite.** One file per world: `universe.db`.
-4. **Sign strings with HMAC.** Chain-linked. Append-only. Immutable history.
-5. **Render strings in a browser.** One iframe. One polling loop.
+1. Listen. Accept connections.
+2. Send and receive strings. Nothing else. No types. No schemas.
+3. Sign strings with HMAC. Chain-linked. Append-only. Immuatble history.
+4. Renders string in a browser. One reactive loop.
 
 See PROTOCOL.md for the formal specification.
 
@@ -154,7 +159,7 @@ Plus a version counter and an HMAC audit chain.
 
 ---
 
-## HTTP endpoints
+## HTTP transport (Reference implementation)
 
 ```
 GET  /{name}/read      → read all three mailboxes + version
@@ -279,7 +284,7 @@ VS Code extension: `.elastikignore` — sensitive files never synced.
 Terminal output scrubbed — lines with passwords/tokens stripped.
 Opt-in required. Remote server warning on non-localhost.
 
-The LLM is an untrusted HTTP client.
+The LLM is an untrusted client.
 The same security principle that protects web servers from malicious browsers.
 30 years old. Still works.
 
@@ -457,6 +462,8 @@ POST /admin/load?name=fs
 POST /admin/unload?name=fs
 ```
 
+OR via WebRTC DataChannel: direct P2P
+
 First run: admin + auth auto-installed from plugins/available/.
 Protected by approve token. AI cannot modify its own capabilities.
 
@@ -494,7 +501,7 @@ your.domain.com:3004   → your server in the cloud
 ```
 
 One tool. Any machine. Any universe.
-When AI can send HTTP directly, MCP stays —
+When AI can send any strings to another program directly, MCP stays —
 not as a translator, but as a token isolator.
 
 ---
@@ -621,5 +628,5 @@ echo "backup done" | curl -X POST -d @- -H "X-Auth-Token: t" localhost:3004/cron
 ...
 ```
 
-If it can send HTTP, it's an elastik client.
+If it can send send a string, it's a elastik client.
 *Copyright © 2026 Ranger Chen . MIT License.*
