@@ -78,7 +78,8 @@ async def handle_postman(method, body, params):
             hint = " (running in container — localhost points to the container, not the host. Use host.docker.internal instead)"
         return {"error": f"host '{host}' not in whitelist{hint}", "allowed": _config["hosts"], "container": _in_container}
     req_method = (params.get("method") or b.get("method", "GET")).upper()
-    req_headers = b.get("headers", {})
+    req_headers = {k: v for k, v in b.get("headers", {}).items()
+                   if k.lower() != "x-approve-token"}
     req_body = (b.get("body") or "").encode("utf-8") or None
 
     req = Request(url, data=req_body, headers=req_headers, method=req_method)
