@@ -35,3 +35,13 @@ llama-server/
 dist/
 bus.crt
 bus.key
+
+# Go build artifacts (binaries are distributed via GitHub Releases,
+# never committed). See .github/workflows/release.yml.
+elastik-go
+elastik-go.exe
+elastik-go-*
+go/verify
+go/verify.exe
+go/*.exe
+go/_*_data/
