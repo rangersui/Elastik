@@ -37,10 +37,11 @@ See [docs/protocol.md](docs/protocol.md) for the formal specification.
 ./install.sh
 ```
 
-That's it. The installer does three things:
+That's it. The installer does four things:
 1. Installs Python dependencies
-2. Configures Claude Desktop to connect to elastik
-3. Detects hardware, starts the server, opens browser
+2. Sets up git hooks (auto-regenerates `plugins.lock` on commit)
+3. Configures Claude Desktop to connect to elastik
+4. Detects hardware, starts the server, opens browser
 
 Restart Claude Desktop. Say something. The wall responds.
 
@@ -430,6 +431,7 @@ plugins/                         route extensions
 renderers/                       HTML renderers (synced at boot)
 skills/                          skill docs + map.md (synced at boot)
 scripts/                         deployment, backup, build tools
+scripts/hooks/                   git hooks (pre-commit auto-regenerates plugins.lock)
 docs/                            design docs, protocol spec, vision
 data/                            universes
 ```
