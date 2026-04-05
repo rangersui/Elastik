@@ -104,6 +104,28 @@ cp "${tmp}/${asset}" ./elastik-go
 chmod +x ./elastik-go
 
 echo "==> installed ./elastik-go (${tag})"
+
+# ── fetch static frontend (best-effort) ─────────────────────────────
+#
+# The Go binary serves index.html / sw.js / openapi.json from the
+# current directory when they exist. Without them, GET / returns a
+# JSON stub and the browser UI does not render. Pull them from the
+# same tag so the versions stay in lockstep with the binary.
+#
+# Best-effort: a failure here warns but does not abort. The binary
+# is already installed and usable from the CLI/HTTP side; the user
+# can re-run to retry or drop the files in manually.
+raw="https://raw.githubusercontent.com/${REPO}/${tag}"
+echo "==> fetching frontend assets"
+fetched=0
+for f in index.html sw.js openapi.json; do
+    if curl -fsSL "${raw}/${f}" -o "./${f}" 2>/dev/null; then
+        fetched=$((fetched + 1))
+    else
+        echo "    warn: could not fetch ${f} (skipping)"
+    fi
+done
+echo "    ${fetched}/3 frontend files in place"
+
 echo ""
 echo "    next:  ./elastik-go"
-echo "    (drop index.html in the same directory for the browser UI)"

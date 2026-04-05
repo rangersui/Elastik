@@ -102,9 +102,31 @@ try {
     Copy-Item -Force $assetPath ".\elastik-go.exe"
 
     Write-Host "==> installed .\elastik-go.exe ($tag)"
+
+    # ── fetch static frontend (best-effort) ──────────────────────────
+    #
+    # The Go binary serves index.html / sw.js / openapi.json from the
+    # current directory when they exist. Without them, GET / returns
+    # a JSON stub and the browser UI does not render. Pull them from
+    # the same tag so the versions stay in lockstep with the binary.
+    #
+    # Best-effort: a failure here warns but does not abort. The
+    # binary is already installed and usable.
+    $raw = "https://raw.githubusercontent.com/$Repo/$tag"
+    Write-Host "==> fetching frontend assets"
+    $fetched = 0
+    foreach ($f in @("index.html", "sw.js", "openapi.json")) {
+        try {
+            Invoke-WebRequest -UseBasicParsing "$raw/$f" -OutFile ".\$f"
+            $fetched++
+        } catch {
+            Write-Host "    warn: could not fetch $f (skipping)"
+        }
+    }
+    Write-Host "    $fetched/3 frontend files in place"
+
     Write-Host ""
     Write-Host "    next:  .\elastik-go.exe"
-    Write-Host "    (drop index.html in the same directory for the browser UI)"
 } finally {
     Remove-Item -Recurse -Force $tmp.FullName -ErrorAction SilentlyContinue
 }
