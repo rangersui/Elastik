@@ -78,6 +78,198 @@ but by architecture. The tab owns its own `universe.db`. The backend
 is optional. Peers find each other over WebRTC. The thesis was the
 proof-of-concept; elastik 3.0 is the generalization.
 
+## Contemporary Work
+
+The browser-as-sovereign-node thesis is not being pursued alone.
+Parallel to elastik's v3.0 design, an independent project arrived at
+the same conclusion from a different axis:
+
+**AI Grid** by Ryan Smith (February 2026, aigrid.soothsawyer.com) —
+"turns every browser tab into a node in a distributed AI cluster."
+Stack:
+
+- **WebGPU** for GPU acceleration, now treated as infrastructure-level
+  compute surface rather than a graphics API
+- **WebLLM** for in-tab large language model inference — no server,
+  no Docker, no cloud
+- **P2P mesh** over WebRTC for direct browser-to-browser compute
+  sharing; tabs can contribute spare GPU cycles to a shared network
+- **Browser sandbox as the trust boundary** — no container runtime,
+  no OS-level isolation needed
+- Entry cost: "a URL and whatever graphics card happens to be sitting
+  in your laptop"
+
+### Why the Compute Layer Is More Than WebGPU
+
+AI Grid picks WebGPU because in early 2026 it's the only broadly
+shipped compute surface in browsers. But the compute layer has
+multiple axes, and a production distributed AI runtime has to talk
+to all of them:
+
+| API | Role | Targets |
+|---|---|---|
+| **WebGPU** | General GPU compute (shaders, kernels, matmul) | Any discrete or integrated GPU |
+| **WebNN** | Hardware ML inference abstraction | Apple ANE, Windows DirectML, Intel NPU, Qualcomm Hexagon, Google TPU |
+| **WASM SIMD / threads** | CPU-side tensor fallback | Everything else |
+| **WASI-NN** (future) | Server-side ML API, same shape as WebNN | Native runtimes |
+
+WebGPU gives you "browser can drive any GPU." WebNN gives you
+"browser can drive **any dedicated AI silicon**" — the ANE chip on
+an iPhone runs int8 inference 3–5× faster than that same phone's
+GPU and at a fraction of the power draw. On Windows laptops with
+Intel/Qualcomm NPUs the gap is larger. WebGPU is the portable
+compute floor; WebNN is the hardware ceiling.
+
+In early 2026 WebNN is still behind an origin trial in Chrome and
+under active spec work, which is why AI Grid ships on WebGPU today.
+But the architectural conclusion is unchanged: **the browser already
+has APIs to reach every kind of compute hardware on the device**.
+Graphics card, NPU, ANE, CPU SIMD — all of them are addressable
+from inside the sandbox, no native install, no driver, no root.
+
+This matters for the protocol layer (next section) because a
+distributed AI coordinator can't assume one compute runtime. The
+same task might be handed to a tab with WebGPU, another with WebNN,
+another with plain WASM — and the coordinator has to route
+accordingly.
+
+### Three Axes, One Thesis
+
+This matters because AI Grid and elastik v3.0 are **orthogonal axes
+of the same thesis**:
+
+| Axis | Project | Year | Proves |
+|---|---|---|---|
+| Transport + on-device inference | 2023 thesis (WebRTC + TF.js PoseNet) | 2023 | Browser tab can stream and infer |
+| **State + protocol sovereignty** | **elastik v3.0 (Go WASM + OPFS SQLite)** | **2026** | **Browser tab can own its database and audit chain** |
+| Compute + model sovereignty | AI Grid (WebGPU/WebNN + WebLLM + mesh) | 2026-02 | Browser tab can run LLMs and share hardware-accelerated compute |
+
+Three independent projects, three years, three teams, all converging
+on the same architectural endpoint: **the browser tab is a complete
+sovereign node** — transport, state, compute, storage, all inside
+the sandbox, no host runtime required.
+
+### elastik IS the Protocol Layer AI Grid Needs
+
+The previous draft of this section said "elastik v3.0 and AI Grid
+are two things we might combine." That undersells it. The accurate
+framing is sharper:
+
+> **Every browser-native distributed AI project needs a protocol
+> layer for task dispatch, result collection, chained audit, and
+> cross-session persistence. elastik is that protocol layer.**
+
+The same way a web app doesn't reinvent HTTP, a browser-distributed
+compute project shouldn't reinvent task dispatch, provenance,
+signing, and persistence. Those concerns are upstream of any
+particular compute runtime (WebGPU, WebNN, WASM) and upstream of
+any particular model (WebLLM, ONNX, custom kernel). They belong in
+a layer underneath.
+
+elastik's existing protocol primitives map point-for-point to what
+a distributed AI coordinator needs:
+
+| Distributed AI Need | elastik Primitive |
+|---|---|
+| Addressable nodes | `world` (per-tab or per-peer namespace) |
+| Task dispatch | `POST /{world}/pending` |
+| Result collection | `POST /{world}/result` |
+| Current-state read | `GET /{world}/read` |
+| Ordered provenance | `events` table, HMAC-chained |
+| Cross-session persistence | OPFS + SQLite (v3.0) or native SQLite (v2.x) |
+| Tamper-evident audit | Signed chain, any peer can verify |
+| Language-neutral implementation | Go (native) + Go WASM (browser), same source |
+
+What's missing for a real distributed-AI runtime is one field:
+**a declared runtime type on the task**. `pending_js` today is
+implicitly "JS in an eval/function sandbox." A worker receiving
+the task needs to know: is this JS, a WebGPU compute kernel, a
+WebNN graph descriptor, a WASM module URL? Workers must decline
+tasks whose runtime they can't host.
+
+### The v3.1 Protocol Extension: Runtime Tagging
+
+The fix is backward-compatible. Add one optional field alongside
+`pending_js`:
+
+```
+stage_meta
+  pending_js       TEXT         -- the task payload (unchanged)
+  pending_runtime  TEXT         -- NEW: "js" (default) | "wasm" | "webgpu" | "webnn" | ...
+  pending_spec     TEXT         -- NEW: optional JSON with resource hints
+                                  (model size, input shape, precision, timeout)
+```
+
+Workers advertise their runtime capabilities on connect. Coordinator
+matches tasks to capable workers. Unknown runtimes → the task
+falls back to the worker pool that explicitly advertises support,
+or stays pending until one shows up.
+
+Default `pending_runtime = "js"` keeps every v2.x client working
+unchanged — no migration, no break.
+
+### The Compute Delegation Flow
+
+```
+ coordinator tab                                worker tab
+      │                                              │  (advertises: webgpu, js)
+      │  POST /{world}/pending                       │
+      │  body    = "<webgpu compute kernel source>"  │
+      │  runtime = "webgpu"                          │
+      ├─────────────────────────────────────────────→│
+      │                                              │  poll /{world}/read
+      │                                              │  → sees pending_js + webgpu
+      │                                              │  → dispatches to GPU pipeline
+      │                                              │
+      │  POST /{world}/result                        │
+      │←─────────────────────────────────────────────┤
+      │  (HMAC-chained event: runtime,               │
+      │   duration, peer_id, model, tokens)          │
+```
+
+Every step is HMAC-signed. Every step appears in the `events`
+table. An auditor weeks later can walk the chain and prove: *tab X
+asked tab Y to run kernel K, tab Y did it on WebGPU backend B in T
+milliseconds, here is the signed receipt*.
+
+### What This Means for AI Grid-class Projects
+
+A project like AI Grid, in this framing, is **an elastik client
+with a WebGPU/WebNN runtime adapter**. Its mesh layer becomes:
+worker tabs connect to the elastik protocol over HTTP (native) or
+direct DB access (browser node), advertise runtimes, pull tasks,
+push results. The mesh's transport is WebRTC DataChannel, but the
+*protocol spoken over that channel* is elastik's HTTP-shaped
+verbs: pending, result, read.
+
+This is the same move HTTP made for web apps in the 90s. The
+browser-AI layer is at that moment now. Either it converges on a
+shared protocol — which is elastik's thesis — or every project
+reinvents the same primitives badly, and nothing composes.
+
+### The Complete Sovereign Tab
+
+A browser tab running elastik v3.0 plus a runtime adapter of its
+choice becomes:
+
+- **Protocol-sovereign** — owns its HMAC chain and SQLite state
+- **Compute-sovereign** — dispatches to local WebGPU/WebNN/WASM, or
+  routes to peers that can host the requested runtime
+- **Storage-sovereign** — OPFS persistence, survives reload
+- **Transport-sovereign** — WebRTC direct peering, no relay unless
+  NAT forces it
+- **Model-sovereign** — ships its own weights or pulls them P2P,
+  never phones home
+
+No cloud. No Docker. No VPS. No login. A URL.
+
+This is the endgame the 2023 thesis pointed at. elastik supplies
+the coordination protocol. Runtime adapters (WebGPU, WebNN, WASM)
+supply the compute. The mesh supplies the transport. Together they
+form a complete distributed runtime where the unit of deployment
+is a browser tab and the unit of coordination is a signed event in
+an append-only log.
+
 ## The Goal
 
 A browser tab should be able to run a complete elastik protocol node — not a
@@ -87,20 +279,27 @@ HMAC chain. Same world CRUD. Same code, compiled twice.
 ## The Stack
 
 ```
-┌─────────────────────────────────────────────────┐
-│ UI layer (JS)                 — glue only       │
-├─────────────────────────────────────────────────┤
-│ Go WASM       — protocol logic (CRUD, HMAC)     │  ← same source as native
-│ SQLite WASM   — database engine (C → WASM)      │
-│ OPFS          — persistent storage (sync I/O)   │
-├─────────────────────────────────────────────────┤
-│ WebRTC        — native C++  → transport         │
-│ Web Crypto    — native      → hashing, signing  │
-│ WebGPU        — native      → AI inference      │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ UI layer (JS)                 — glue only                 │
+├───────────────────────────────────────────────────────────┤
+│ Go WASM       — protocol logic (CRUD, HMAC, chain verify) │  ← same source as native
+│ SQLite WASM   — database engine (C → WASM)                │
+│ OPFS          — persistent storage (sync I/O)             │
+├───────────────────────────────────────────────────────────┤
+│ WebRTC        — native C++  → peer transport              │
+│ Web Crypto    — native      → hashing, signing            │
+│ WebGPU        — native      → GPGPU compute (any GPU)     │
+│ WebNN         — native      → hardware ML (NPU/ANE/etc.)  │
+│ WASM SIMD     — native      → CPU tensor fallback         │
+└───────────────────────────────────────────────────────────┘
 ```
 
-JS does glue only. Every expensive operation runs in WASM or native browser APIs.
+JS does glue only. Every expensive operation runs in WASM or native
+browser APIs. The compute row has **three parallel backends**, not
+one: the `pending_runtime` field on a task tells workers which row
+to dispatch to. A tab with a beefy GPU advertises WebGPU; an iPhone
+advertises WebNN (routes to ANE); an old laptop falls back to WASM
+SIMD. Same protocol, heterogeneous hardware.
 
 ## Why OPFS Changes Everything
 
