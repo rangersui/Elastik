@@ -11,8 +11,16 @@ ROUTES = {}
 async def auth_middleware(scope, path, method):
     # GET always open
     if method == "GET": return True
-    # Browser routes — no token available
     parts = [p for p in path.split("/") if p]
+    # Admin + config worlds = approve token required — checked FIRST, before any bypass
+    if path.startswith("/admin/") or (len(parts) >= 1 and parts[0].startswith("config-") and method == "POST"):
+        approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+        if not approve: return False  # no approve token = locked
+        headers = dict(scope.get("headers", []))
+        tok = headers.get(b"x-approve-token", b"").decode()
+        import hmac as _hmac
+        return _hmac.compare_digest(tok, approve)
+    # Browser routes — no token available (sync/result/clear for non-config worlds)
     if len(parts) == 2 and parts[1] in ("sync", "result", "clear"): return True
     # Signal worlds — ephemeral WebRTC signaling, no auth needed
     if len(parts) >= 1 and parts[0].startswith("signal-"): return True
@@ -20,14 +28,6 @@ async def auth_middleware(scope, path, method):
     if path.startswith("/auth/"): return True
     # Plugin approve has its own token check inside handler
     if path == "/plugins/approve": return True
-    # Admin + config worlds = approve token required (mode 2 only)
-    if path.startswith("/admin/") or (path.startswith("/config-") and method == "POST"):
-        approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
-        if not approve: return False  # no approve token = locked
-        headers = dict(scope.get("headers", []))
-        tok = headers.get(b"x-approve-token", b"").decode()
-        import hmac as _hmac
-        return _hmac.compare_digest(tok, approve)
 
     # Everything else — check X-Auth-Token
     token = os.getenv("ELASTIK_TOKEN", "")
