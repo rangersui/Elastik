@@ -1,4 +1,8 @@
-"""Auth plugin — X-Auth-Token middleware. Install to enable authentication."""
+"""Auth plugin — X-Auth-Token middleware. Mode-aware.
+
+Mode 1 (executor):    auth token → read/write. admin/config blocked.
+Mode 2 (autonomous):  approve token → admin/config unlocked.
+"""
 import os
 
 DESCRIPTION = "Token-based auth middleware"
@@ -14,15 +18,16 @@ async def auth_middleware(scope, path, method):
     if len(parts) >= 1 and parts[0].startswith("signal-"): return True
     # Auth plugin routes must be open
     if path.startswith("/auth/"): return True
-    # Plugin approve has its own token — let server.py handle it
+    # Plugin approve has its own token check inside handler
     if path == "/plugins/approve": return True
-    # Admin + config worlds = modify system = approve token required
+    # Admin + config worlds = approve token required (mode 2 only)
     if path.startswith("/admin/") or (path.startswith("/config-") and method == "POST"):
+        approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+        if not approve: return False  # no approve token = locked
         headers = dict(scope.get("headers", []))
         tok = headers.get(b"x-approve-token", b"").decode()
-        approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
         import hmac as _hmac
-        return _hmac.compare_digest(tok, approve) if approve else True
+        return _hmac.compare_digest(tok, approve)
 
     # Everything else — check X-Auth-Token
     token = os.getenv("ELASTIK_TOKEN", "")

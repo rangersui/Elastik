@@ -40,7 +40,7 @@ See PROTOCOL.md for the formal specification.
 That's it. The installer does three things:
 1. Installs Python dependencies
 2. Configures Claude Desktop to connect to elastik
-3. Starts the server
+3. Detects hardware, starts the server, opens browser
 
 Restart Claude Desktop. Say something. The wall responds.
 
@@ -51,11 +51,40 @@ Restart Claude Desktop. Say something. The wall responds.
 - **Everything else** (Gemini, Ollama, your own agent) — just POST and GET, see [Integrate anything](#integrate-anything)
 
 <details>
+<summary>One command start</summary>
+
+```bash
+python elastik.py
+```
+
+Detects hardware (GPU, RAM, CPU), assigns a tier, starts `server.py`, opens browser.
+
+```bash
+python elastik.py --headless       # edge device / NAS / Raspberry Pi / CI
+python elastik.py --no-browser     # server only
+python elastik.py --port 8080      # override port
+python elastik.py --skip-detect    # skip hardware detection
+```
+
+Tier info is written to the `tier-info` world. Renderers can read it and adapt.
+
+`elastik.py` never imports `server.py`. Communication is plain HTTP to localhost.
+If you don't want it, `python server.py` still works unchanged.
+
+</details>
+
+<details>
 <summary>Manual install</summary>
 
 ```bash
 pip install -r requirements.txt
-python server.py
+python elastik.py
+```
+
+Or skip the launcher:
+```bash
+python boot.py      # full system (plugins + cron)
+python server.py    # bare protocol only
 ```
 
 Or with Docker:
@@ -74,7 +103,13 @@ Open `http://localhost:3004`. Empty. Say something to your AI.
 No pip, no install. Just Python:
 
 ```bash
-python server.py
+python elastik.py
+```
+
+Or directly:
+```bash
+python boot.py     # full system
+python server.py   # bare protocol
 ```
 
 Falls back to a built-in ASGI server if uvicorn is missing.
@@ -363,7 +398,7 @@ Approve token is in the terminal. AI can't see it. Physics, not policy.
 
 ## Self-Evolution
 
-~675 lines. Zero frameworks. AI reads the entire codebase in one context window.
+~600 lines across 3 files. Zero frameworks. AI reads the entire codebase in one context window.
 
 ```bash
 python lucy.py evolve   # start dev container (port 3005)
@@ -381,8 +416,11 @@ git merge is the only approve button.
 ## Files
 
 ```
-server.py          ~500 lines    the protocol
-index.html         ~25 lines     one iframe, one polling loop
+server.py          ~258 lines    the protocol (testament format — hand-copyable)
+plugins.py         ~197 lines    plugin load/unload/cron/propose/approve
+boot.py             ~78 lines    startup orchestrator (server + plugins + sync)
+elastik.py         ~510 lines    launcher (detect + server + browser)
+index.html          ~25 lines    one iframe, one polling loop
 mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
 lucy.py            ~110 lines    CLI
 map.md                           world index (source of truth)
@@ -395,7 +433,14 @@ scripts/                         deployment, backup, build tools
 data/                            universes
 ```
 
-Zero-dependency mode: just `python server.py`. Optional: `uvicorn`, `mcp`.
+Three entry points:
+```
+python server.py   → bare protocol, no plugins (~258 lines, the testament)
+python boot.py     → full system (plugins, cron, /info, sync)
+python elastik.py  → boot + hardware detect + browser
+```
+
+Zero-dependency mode: just `python server.py` (bare protocol) or `python boot.py` (full system). Optional: `uvicorn`, `mcp`.
 
 ---
 
@@ -441,7 +486,7 @@ See scripts/MOBILE.md for setup guides.
 Plugins are .py files in plugins/. Auto-loaded at startup.
 Each plugin exports ROUTES, DESCRIPTION, and optional PARAMS_SCHEMA.
 Plugins declare dependencies with `NEEDS = ["_plugin_meta", "_cron_tasks"]` —
-server injects only what's declared.
+plugins.py injects only what's declared.
 `GET /info` returns all plugin metadata. AI reads once, knows everything.
 See plugins/PLUGIN_SPEC.md for the full specification.
 
@@ -545,7 +590,7 @@ Every protocol below is transparent transport.
 
 ## Ecosystem
 ```
-elastik              → protocol + server (~350 lines)
+elastik              → protocol (~258) + plugins (~197) + boot (~78)
 elastik-extension    → Lucy in every browser tab
 elastik-vscode       → Lucy in every editor tab
 ```

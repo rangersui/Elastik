@@ -128,4 +128,4 @@ When server.py is auto-updated from remote peers via sync.py, or when running on
 - sync.py — could deliver server.py updates from trusted peers
 - server.py startup sequence (line 1-25, env loading)
 - `config-boot-hash` — new config world for storing approved hash
-- Docker deployment (Dockerfile uses `python server.py` — would change to `python boot.py`)
+- Docker deployment (Dockerfile uses `python boot.py`)

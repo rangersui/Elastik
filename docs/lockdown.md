@@ -118,7 +118,7 @@ When deploying on mobile devices (laptops, tablets) that move between home WiFi 
 
 ## Related
 - `auth.py` plugin: provides the AUTH_MIDDLEWARE that lockdown wraps or overrides
-- `IN_CONTAINER` detection in server.py (line 21)
+- `IN_CONTAINER` detection in plugins.py
 - `config-*` worlds: convention for system configuration
 - `log_event()` in server.py: HMAC-chained audit trail
 - `honeypot.md`: lockdown and honeypot are complementary -- lockdown is the first gate, honeypot catches what gets through
