@@ -2,7 +2,8 @@
 .env
 _env
 .env.local
-endpoints.json
+conf/*.json
+!conf/*.example.json
 
 # Python
 __pycache__/
