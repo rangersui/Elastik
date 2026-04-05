@@ -1,8 +1,8 @@
-"""elastik — reference implementation. ~350 lines."""
+"""elastik — the protocol. ~258 lines. Hand-copyable. The survivor's format."""
 import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, time
 from pathlib import Path
 
-DATA, PLUGINS = Path("data"), Path("plugins")
+DATA = Path("data")
 # Load env file: .env, _env, .env.local (iOS doesn't support dotfiles)
 for _ef in (".env", "_env", ".env.local"):
     _ep = Path(__file__).resolve().parent / _ef
@@ -15,11 +15,8 @@ for _ef in (".env", "_env", ".env.local"):
         break
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
-APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "") or secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
-IN_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv") or os.getenv("CONTAINER") == "1"
-_DANGEROUS_PLUGINS = {"exec", "fs"}
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
 OPENAPI = Path(__file__).with_name("openapi.json").read_text(encoding="utf-8")
@@ -44,7 +41,6 @@ def conn(name):
     if name not in _db:
         d = DATA / name; d.mkdir(parents=True, exist_ok=True)
         db_path = d / "universe.db"
-        # Clean stale WAL/SHM files that can block startup (Windows Docker volume mounts)
         for ext in ("-shm", "-wal"):
             stale = d / f"universe.db{ext}"
             try: stale.unlink(missing_ok=True)
@@ -55,7 +51,7 @@ def conn(name):
             c.execute("PRAGMA journal_mode=WAL")
             c.execute("PRAGMA synchronous=FULL")
         except sqlite3.OperationalError:
-            pass  # stale WAL on shared volume — proceed without WAL
+            pass
         c.executescript("""
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
@@ -98,135 +94,10 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
 
-_plugins, _auth, _plugin_meta = {}, None, []
-_cron_tasks = {}  # name → {interval, handler, last_run}
-_start_time = time.time()
-
-def load_plugin(name):
-    """Load or reload a single plugin by name."""
-    if not _VALID_NAME.match(name):
-        print(f"  rejected invalid plugin name: {name}"); return
-    if name in _DANGEROUS_PLUGINS and not IN_CONTAINER and not os.getenv("ELASTIK_ALLOW_DANGEROUS"):
-        print(f"  ! {name} blocked -- bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
-    global _auth
-    f = PLUGINS / f"{name}.py"
-    src = PLUGINS / "available" / f"{name}.py"
-    if src.exists():
-        PLUGINS.mkdir(exist_ok=True)
-        new_text = src.read_text(encoding="utf-8")
-        old_text = f.read_text(encoding="utf-8") if f.exists() else ""
-        if new_text != old_text:
-            f.write_text(new_text, encoding="utf-8")
-            print(f"  updated from available: {name}")
-    elif not f.exists():
-        print(f"  not found: {name}"); return
-    try:
-        async def _call(route, method="POST", body=b"", params=None):
-            """Plugin service binding — call another plugin's handler directly."""
-            h = _plugins.get(route)
-            if not h: return {"error": f"route {route} not found"}
-            return await h(method, body, params or {})
-        _injectable = {
-            "load_plugin": load_plugin, "unload_plugin": unload_plugin,
-            "_plugins": _plugins, "_plugin_meta": _plugin_meta,
-            "_cron_tasks": _cron_tasks, "_start_time": _start_time,
-        }
-        ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent,
-              "conn": conn, "log_event": log_event, "_call": _call}
-        text = f.read_text(encoding="utf-8")
-        needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', text)
-        if needs_match:
-            needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
-            ns.update({k: _injectable[k] for k in needed if k in _injectable})
-        exec(text, ns)
-        # Remove old routes for this plugin
-        old = next((m for m in _plugin_meta if m["name"] == name), None)
-        if old:
-            for r in old["routes"]: _plugins.pop(r, None)
-            _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
-        # Register new routes
-        routes = list(ns.get("ROUTES", {}).keys())
-        for path, handler in ns.get("ROUTES", {}).items():
-            _plugins[path] = handler
-        if "AUTH_MIDDLEWARE" in ns: _auth = ns["AUTH_MIDDLEWARE"]
-        _plugin_meta.append({"name": name, "description": ns.get("DESCRIPTION", ""),
-            "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])})
-        # Auto-create skills world from plugin SKILL field
-        skill_doc = ns.get("SKILL", "")
-        if skill_doc:
-            c = conn(f"skills-{name.replace('_', '-')}")
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
-            c.commit()
-            print(f"  skill: skills-{name.replace('_', '-')}")
-        # Auto-register cron task
-        if "CRON" in ns and "CRON_HANDLER" in ns:
-            _cron_tasks[name] = {"interval": int(ns["CRON"]), "handler": ns["CRON_HANDLER"], "last_run": time.time()}
-            print(f"  cron: {name} every {ns['CRON']}s")
-        print(f"  loaded: {name} ({routes})")
-    except Exception as e: print(f"  error loading {name}: {e}")
-
-def unload_plugin(name):
-    """Unload a plugin — remove its routes."""
-    global _auth
-    meta = next((m for m in _plugin_meta if m["name"] == name), None)
-    if not meta: print(f"  not loaded: {name}"); return
-    for r in meta["routes"]: _plugins.pop(r, None)
-    if name == "auth" or "auth" in meta.get("description", "").lower(): _auth = None
-    _sync_actions_remove(name, meta["routes"])
-    # Auto-clear skills world
-    skill_world = f"skills-{name.replace('_', '-')}"
-    try:
-        if (DATA / skill_world).exists():
-            c = conn(skill_world)
-            c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
-            c.commit()
-            print(f"  skill cleared: {skill_world}")
-    except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
-    _cron_tasks.pop(name, None)
-    _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
-    print(f"  unloaded: {name}")
-
-def _sync_actions_add(name):
-    """Register a plugin's routes in config-actions whitelist."""
-    meta = next((m for m in _plugin_meta if m["name"] == name), None)
-    if not meta or not meta["routes"]: return
-    c = conn("config-actions")
-    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-    existing = set(l.strip() for l in old.splitlines() if l.strip())
-    added = [r for r in meta["routes"] if r not in existing]
-    if added:
-        new = old.rstrip("\n") + "\n" + "\n".join(added) + "\n" if old.strip() else "\n".join(added) + "\n"
-        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (new,))
-        c.commit()
-
-def _sync_actions_remove(name, routes):
-    """Remove a plugin's routes from config-actions whitelist."""
-    if not routes: return
-    try:
-        c = conn("config-actions")
-        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-        remove = set(routes)
-        lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]
-        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", ("\n".join(lines) + "\n" if lines else "",))
-        c.commit()
-    except Exception as e: print(f"  warn: actions cleanup failed: {e}")
-
-
-def load_plugins():
-    """Load all plugins at startup. Install defaults if empty."""
-    installed = [f for f in PLUGINS.glob("*.py") if not f.name.startswith("_")] if PLUGINS.exists() else []
-    if not installed:
-        available = PLUGINS / "available"
-        if available.exists():
-            PLUGINS.mkdir(exist_ok=True)
-            for name in ["admin.py", "auth.py"]:
-                src = available / name
-                if src.exists():
-                    (PLUGINS / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-                    print(f"  installed default: {name}")
-    if not PLUGINS.exists(): return
-    for f in PLUGINS.glob("*.py"):
-        if not f.name.startswith("_"): load_plugin(f.stem)
+# ── Plugin slots — empty by default. plugins.py fills them. ──────────
+_plugins = {}     # route path → async handler
+_auth = None      # auth middleware (set by auth plugin)
+_plugin_meta = [] # plugin metadata list
 
 async def app(scope, receive, send):
     if scope["type"] != "http": return
@@ -239,6 +110,7 @@ async def app(scope, receive, send):
         return await send_r(send, 403, '{"error":"unauthorized"}')
     parts = [p for p in path.split("/") if p]
 
+    # Plugin route dispatch — slot empty = skip
     base_path = path.split("?")[0]
     if base_path in _plugins:
         b = await recv(receive)
@@ -255,55 +127,6 @@ async def app(scope, receive, send):
 
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
-    if method == "GET" and path == "/info":
-        skills = ""
-        try:
-            if (DATA / "skills-core").exists():
-                skills = conn("skills-core").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-        except Exception as e: print(f"  warn: skills-core read failed: {e}")
-        if not skills:
-            sp = Path(__file__).with_name("SKILLS.md")
-            if sp.exists(): skills = sp.read_text(encoding="utf-8")
-        auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
-        renderers, worlds = [], []
-        if DATA.exists():
-            for d in sorted(DATA.iterdir()):
-                if d.is_dir() and (d / "universe.db").exists():
-                    if d.name.startswith("renderer-"): renderers.append(d.name)
-                    elif not d.name.startswith("config-"): worlds.append(d.name)
-        cdn_raw = ""
-        try:
-            if (DATA / "config-cdn").exists():
-                r = conn("config-cdn").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-                if r: cdn_raw = r["stage_html"]
-        except Exception as e: print(f"  warn: CDN config read failed: {e}")
-        cdn = [d.strip() for d in cdn_raw.splitlines() if d.strip()] if cdn_raw.strip() else ["* (all HTTPS)"]
-        available = []
-        avail_dir = PLUGINS / "available"
-        if avail_dir.exists():
-            loaded = {m["name"] for m in _plugin_meta}
-            for f in sorted(avail_dir.glob("*.py")):
-                if f.stem not in loaded:
-                    desc = ""
-                    for line in f.read_text(encoding="utf-8").splitlines():
-                        if line.startswith("DESCRIPTION"):
-                            try: desc = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            except Exception: pass
-                            break
-                    available.append({"name": f.stem, "description": desc})
-        skill_worlds = [d.name for d in sorted(DATA.iterdir())
-                        if d.is_dir() and d.name.startswith("skills-") and (d / "universe.db").exists()] if DATA.exists() else []
-        return await send_r(send, 200, json.dumps({
-            "routes": list(_plugins.keys()),
-            "auth": auth_name,
-            "plugins": _plugin_meta,
-            "available": available,
-            "renderers": renderers,
-            "worlds": worlds,
-            "skill_worlds": skill_worlds,
-            "cdn": cdn,
-            "skills": skills,
-        }))
     if method == "GET" and path == "/stages":
         stages = []
         if DATA.exists():
@@ -319,38 +142,16 @@ async def app(scope, receive, send):
         log_event("default", "webhook_received", {"source": parts[1], "body": b})
         return await send_r(send, 200, '{"ok":true}')
 
-    if method == "POST" and len(parts) == 2 and parts[0] == "plugins":
-        try: b = json.loads(await recv(receive))
-        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        if parts[1] == "propose":
-            log_event("default", "plugin_proposed", b)
-            name = b.get("name", "unknown")
-            desc = b.get("description", "")
-            code = b.get("code", "")
-            summary = f"\n---\n## {name}\n{desc}\n```python\n{code}\n```\n"
-            c = conn("plugin-proposals")
-            old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (old + summary,))
-            c.commit()
-            return await send_r(send, 200, '{"ok":true}')
-        if parts[1] == "approve":
-            tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
-            if not _hmac.compare_digest(tok, APPROVE_TOKEN): return await send_r(send, 403, '{"error":"invalid token"}')
-            n, code = b.get("name", ""), b.get("code", "")
-            if n and not _VALID_NAME.match(n): return await send_r(send, 400, '{"error":"invalid plugin name"}')
-            if n and code:
-                PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
-                load_plugin(n); _sync_actions_add(n)
-                log_event("default", "plugin_approved", {"name": n})
-            return await send_r(send, 200, '{"ok":true}')
-
     if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
         name, action = parts
         if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
-        c = conn(name)
         if method == "GET" and action == "read":
+            if not (DATA / name / "universe.db").exists():
+                return await send_r(send, 404, '{"error":"world not found"}')
+            c = conn(name)
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
+        c = conn(name)
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         b = _extract(b, action)
@@ -378,140 +179,83 @@ async def app(scope, receive, send):
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
 
-def _sync_dir(directory, glob_pattern, world_name_fn, label):
-    """Sync files from a directory to worlds. Only writes if content changed."""
-    d = Path(__file__).resolve().parent / directory
-    if not d.exists(): return
-    for f in sorted(d.glob(glob_pattern)):
-        name = world_name_fn(f)
-        content = f.read_text(encoding="utf-8")
-        c = conn(name)
-        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-        if old["stage_html"] != content:
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
-            c.commit()
-            print(f"  {label}: synced {name}")
+# ── Mini ASGI server — zero dependencies ─────────────────────────────
 
-def _sync_map():
-    """Sync map.md + append undocumented worlds. map.md is source of truth."""
-    f = Path(__file__).resolve().parent / "map.md"
-    if not f.exists(): return
-    text = f.read_text(encoding="utf-8")
-    # Parse documented world names from map.md
-    documented = set()
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            name = stripped.split("—")[0].split("–")[0].strip()
-            if name: documented.add(name)
-    # Find all worlds, append undocumented ones
-    suffix = ""
-    for db in sorted(DATA.iterdir()) if DATA.exists() else []:
-        if db.is_dir() and db.name not in documented:
-            suffix += f"{db.name:<21}— (undocumented)\n"
-    content = text.rstrip("\n") + "\n"
-    if suffix:
-        content += suffix
-    # Write to map world if changed
-    c = conn("map")
-    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-    if old["stage_html"] != content:
-        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
-        c.commit()
-        print(f"  map: synced ({len(documented)} documented" + (f", {suffix.count(chr(10))} undocumented)" if suffix else ")"))
-
-if __name__ == "__main__":
-    load_plugins()
-    _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
-    _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
-    _sync_map()
-    if not AUTH_TOKEN:
-        print("\n  ! ELASTIK_TOKEN not set. Refusing to start in public mode.")
-        print("  Set ELASTIK_TOKEN in .env or environment.\n")
-        sys.exit(1)
-    mode = "container" if IN_CONTAINER else "bare metal"
-    print(f"\n  elastik -> http://{HOST}:{PORT}  [{mode}]")
-    print(f"  auth token:    {AUTH_TOKEN}")
-    print(f"  approve token: {APPROVE_TOKEN}")
-    if not IN_CONTAINER:
-        print(f"  ! bare metal -- dangerous plugins ({', '.join(_DANGEROUS_PLUGINS)}) blocked")
-        if os.getenv("ELASTIK_ALLOW_DANGEROUS"): print(f"  ! ELASTIK_ALLOW_DANGEROUS override active")
-    print()
-    async def _cron_loop():
-        while True:
-            await asyncio.sleep(1)
-            now = time.time()
-            for name, task in list(_cron_tasks.items()):
-                if now - task["last_run"] >= task["interval"]:
-                    try:
-                        await task["handler"]()
-                        task["last_run"] = now
-                    except Exception as e:
-                        print(f"  cron {name}: {e}")
-
-    async def _mini_serve(app, host, port):
-        """Zero-dependency ASGI server. ~40 lines. Enough for single-user localhost."""
-        async def handle(reader, writer):
-            try:
-                line = await reader.readline()
-                if not line: writer.close(); return
-                parts = line.decode("utf-8", "replace").strip().split(" ", 2)
-                if len(parts) < 2: writer.close(); return
-                method, full_path = parts[0], parts[1]
-                headers = []
-                while True:
-                    h = await reader.readline()
-                    if h in (b"\r\n", b"\n", b""): break
-                    decoded = h.decode("utf-8", "replace").strip()
-                    if ": " in decoded:
-                        k, v = decoded.split(": ", 1)
-                        headers.append([k.lower().encode(), v.encode()])
-                content_length = 0
-                for k, v in headers:
-                    if k == b"content-length": content_length = int(v); break
-                body = await reader.readexactly(content_length) if content_length else b""
-                path_part = full_path.split("?")[0]
-                qs = full_path.split("?", 1)[1] if "?" in full_path else ""
-                scope = {
-                    "type": "http", "method": method, "path": path_part,
-                    "raw_path": path_part.encode(), "query_string": qs.encode(),
-                    "headers": headers,
-                }
-                response = {}
-                async def receive():
-                    return {"type": "http.request", "body": body}
-                async def send(msg):
-                    if msg["type"] == "http.response.start":
-                        response["status"] = msg["status"]
-                        response["headers"] = msg.get("headers", [])
-                    elif msg["type"] == "http.response.body":
-                        out = f"HTTP/1.1 {response['status']} OK\r\n".encode()
-                        for k, v in response["headers"]:
-                            out += k + b": " + v + b"\r\n"
-                        out += b"\r\n" + msg.get("body", b"")
-                        writer.write(out)
-                        await writer.drain()
-                await app(scope, receive, send)
-            except Exception as e:
-                try:
-                    writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+async def _mini_serve(asgi_app, host, port):
+    """Zero-dependency ASGI server. Enough for single-user localhost."""
+    async def handle(reader, writer):
+        try:
+            line = await reader.readline()
+            if not line: writer.close(); return
+            parts = line.decode("utf-8", "replace").strip().split(" ", 2)
+            if len(parts) < 2: writer.close(); return
+            method, full_path = parts[0], parts[1]
+            headers = []
+            while True:
+                h = await reader.readline()
+                if h in (b"\r\n", b"\n", b""): break
+                decoded = h.decode("utf-8", "replace").strip()
+                if ": " in decoded:
+                    k, v = decoded.split(": ", 1)
+                    headers.append([k.lower().encode(), v.encode()])
+            content_length = 0
+            for k, v in headers:
+                if k == b"content-length": content_length = int(v); break
+            body = await reader.readexactly(content_length) if content_length else b""
+            path_part = full_path.split("?")[0]
+            qs = full_path.split("?", 1)[1] if "?" in full_path else ""
+            scope = {
+                "type": "http", "method": method, "path": path_part,
+                "raw_path": path_part.encode(), "query_string": qs.encode(),
+                "headers": headers,
+            }
+            response = {}
+            async def _recv():
+                return {"type": "http.request", "body": body}
+            async def _send(msg):
+                if msg["type"] == "http.response.start":
+                    response["status"] = msg["status"]
+                    response["headers"] = msg.get("headers", [])
+                elif msg["type"] == "http.response.body":
+                    out = f"HTTP/1.1 {response['status']} OK\r\n".encode()
+                    for k, v in response["headers"]:
+                        out += k + b": " + v + b"\r\n"
+                    out += b"\r\n" + msg.get("body", b"")
+                    writer.write(out)
                     await writer.drain()
-                except Exception: pass
-            finally:
-                try: writer.close()
-                except Exception: pass
-        srv = await asyncio.start_server(handle, host, port)
-        await srv.serve_forever()
+            await asgi_app(scope, _recv, _send)
+        except Exception:
+            try:
+                writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                await writer.drain()
+            except Exception: pass
+        finally:
+            try: writer.close()
+            except Exception: pass
+    srv = await asyncio.start_server(handle, host, port)
+    await srv.serve_forever()
 
+def run(extra_tasks=None):
+    """Start the server. extra_tasks: list of coroutines to run alongside."""
+    tasks = extra_tasks or []
     try:
         import uvicorn
         async def _serve():
             config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
             server = uvicorn.Server(config)
-            await asyncio.gather(server.serve(), _cron_loop())
+            await asyncio.gather(server.serve(), *tasks)
         asyncio.run(_serve())
     except ImportError:
         print("  (uvicorn not found -- using built-in server)")
         async def _serve():
-            await asyncio.gather(_mini_serve(app, HOST, PORT), _cron_loop())
+            await asyncio.gather(_mini_serve(app, HOST, PORT), *tasks)
         asyncio.run(_serve())
+
+if __name__ == "__main__":
+    if not AUTH_TOKEN:
+        print("\n  ! ELASTIK_TOKEN not set. Refusing to start in public mode.")
+        print("  Set ELASTIK_TOKEN in .env or environment.\n")
+        sys.exit(1)
+    print(f"\n  elastik -> http://{HOST}:{PORT}  [protocol only]")
+    print(f"  no plugins loaded. use boot.py for full system.\n")
+    run()

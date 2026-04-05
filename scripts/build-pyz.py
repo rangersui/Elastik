@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 
 # Files to bundle
-CORE_FILES = ["server.py", "index.html", "openapi.json", "sw.js", "map.md"]
+CORE_FILES = ["server.py", "plugins.py", "boot.py", "index.html", "openapi.json", "sw.js", "map.md"]
 DIRS = {
     "plugins/available": "plugins/available",
     "skills": "skills",
@@ -42,12 +42,14 @@ if zipfile.is_zipfile(sys.argv[0]):
                     dst.write(src.read())
                 print(f"  extracted: {name}")
 
-# Run server.py from CWD
+# Run boot.py from CWD (full system with plugins)
 os.chdir(cwd)
-server_path = os.path.join(cwd, "server.py")
-sys.argv[0] = server_path
-g = {"__file__": server_path, "__name__": "__main__", "__builtins__": __builtins__}
-exec(compile(open(server_path, encoding="utf-8").read(), server_path, "exec"), g)
+boot_path = os.path.join(cwd, "boot.py")
+if not os.path.exists(boot_path):
+    boot_path = os.path.join(cwd, "server.py")  # fallback
+sys.argv[0] = boot_path
+g = {"__file__": boot_path, "__name__": "__main__", "__builtins__": __builtins__}
+exec(compile(open(boot_path, encoding="utf-8").read(), boot_path, "exec"), g)
 '''
 
 def build():

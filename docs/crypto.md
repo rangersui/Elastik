@@ -57,12 +57,12 @@ The stdlib HMAC-CTR is the default. If `cryptography` is available, use AES-CTR 
 Integration point in server.py — wrap the existing read/write handlers:
 
 ```python
-# In the write handler (server.py ~line 358)
+# In the write handler (server.py write action)
 world_key = derive_world_key(KEY, name)
 encrypted = encrypt_stage(world_key, new_version, body)
 c.execute("UPDATE stage_meta SET stage_html=?,version=?,...", (encrypted, new_version))
 
-# In the read handler (server.py ~line 352)
+# In the read handler (server.py read action)
 row = c.execute("SELECT stage_html, version FROM stage_meta WHERE id=1").fetchone()
 world_key = derive_world_key(KEY, name)
 plaintext = decrypt_stage(world_key, row["version"], row["stage_html"])

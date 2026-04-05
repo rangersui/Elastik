@@ -56,8 +56,9 @@ async def handle_load(method, body, params):
             name = raw
     if not name:
         return {"error": "name required"}
-    load_plugin(name)
-    return {"ok": True, "loaded": name}
+    if load_plugin(name):
+        return {"ok": True, "loaded": name}
+    return {"error": f"failed to load {name}", "_status": 403}
 
 
 async def handle_unload(method, body, params):

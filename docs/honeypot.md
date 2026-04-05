@@ -129,5 +129,5 @@ When elastik is exposed to the public internet -- either directly or through a t
 ## Related
 - `auth.py` plugin: provides AUTH_MIDDLEWARE that this wraps
 - `log_event()` in server.py: HMAC-chained audit log
-- CRON system in server.py: `_cron_tasks` dict, `CRON` + `CRON_HANDLER` plugin fields
+- CRON system in plugins.py: `_cron_tasks` dict, `CRON` + `CRON_HANDLER` plugin fields
 - `config-*` worlds: convention for system configuration stored in SQLite

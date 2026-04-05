@@ -7,14 +7,14 @@ Don't load all plugins at startup. Register lightweight route stubs that trigger
 
 ### The problem
 
-`load_plugins()` in server.py loads every `.py` file in the `plugins/` directory at startup. Each plugin executes its top-level code, registers routes, and may start CRON tasks. With 10+ plugins, this adds startup time, memory overhead, and CRON load even for plugins that are rarely used.
+`load_plugins()` in plugins.py loads every `.py` file in the `plugins/` directory at startup. Each plugin executes its top-level code, registers routes, and may start CRON tasks. With 10+ plugins, this adds startup time, memory overhead, and CRON load even for plugins that are rarely used.
 
 ### Stub registration
 
 Instead of calling `load_plugin()` for each file, register a stub route that intercepts the first request:
 
 ```python
-# In server.py, replaces the current load_plugins() behavior when JIT is enabled
+# In plugins.py, replaces the current load_plugins() behavior when JIT is enabled
 
 def _register_stub(plugin_name, routes):
     """Register placeholder routes that load the real plugin on first hit."""
@@ -132,8 +132,8 @@ Key constraint: `auth.py` must always be in `always_load`. If auth is JIT-loaded
 When running many plugins (8+) but most are rarely used. Saves memory and startup time. Not worth the complexity for 3-4 plugins.
 
 ## Related
-- `load_plugin()` / `unload_plugin()` in server.py: the core plugin lifecycle
+- `load_plugin()` / `unload_plugin()` in plugins.py: the core plugin lifecycle
 - `_plugins` dict in server.py: route → handler mapping that stubs populate
 - `_plugin_meta` list: metadata for /info endpoint
 - CRON system: `_cron_tasks`, `CRON` + `CRON_HANDLER` for idle detection
-- `load_plugins()` in server.py: the function this replaces/wraps
+- `load_plugins()` in plugins.py: the function this replaces/wraps

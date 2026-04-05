@@ -12,7 +12,8 @@ def cmd_start(args):
     env = os.environ.copy()
     if args.public: env["ELASTIK_HOST"] = "0.0.0.0"
     if args.port: env["ELASTIK_PORT"] = str(args.port)
-    subprocess.run([sys.executable, str(ROOT / "server.py")], env=env)
+    target = ROOT / "boot.py" if (ROOT / "boot.py").exists() else ROOT / "server.py"
+    subprocess.run([sys.executable, str(target)], env=env)
 
 def cmd_stages(_):
     if not DATA.exists(): print("no stages."); return

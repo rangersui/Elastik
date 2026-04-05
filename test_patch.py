@@ -1,6 +1,10 @@
 """Tests for the patch route."""
-import pytest
-from server import apply_patch
+import pytest, types
+
+# apply_patch lives in the plugin file — exec() it to extract the function
+_ns = {}
+exec(open("plugins/available/patch.py", encoding="utf-8").read(), _ns)
+apply_patch = _ns["apply_patch"]
 
 
 class TestInsert:
