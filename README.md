@@ -31,7 +31,7 @@ See [docs/protocol.md](docs/protocol.md) for the formal specification.
 
 ## Install
 
-Two paths. Different audiences. Zero overlap.
+Three paths. Pick the one that matches what you have.
 
 ### Go Lite — zero dependencies
 
@@ -56,6 +56,32 @@ No sudo. No admin rights. Nothing global. Delete the file to uninstall.
 Go Lite is the protocol only: worlds, HMAC chain, three mailboxes,
 static assets, PWA install. No plugins, no MCP, no Claude Desktop integration.
 For that, use the Python path below.
+
+### Browser only — Chromebook, tablet, any device with a browser
+
+No install. Open a URL. The browser is the client; elastik runs elsewhere.
+
+**Connect to a running instance:**
+```
+http://your-server:3005/work
+```
+
+Any device with a browser reaches any elastik server. The server can
+be Go Lite on a NAS, `server.py` on a VPS, a friend's laptop on
+Tailscale — anything that carries strings over HTTP. The Chromebook
+is a pure terminal: rule 5 (render in a browser) and nothing else.
+
+**Chromebook with Linux (Crostini):**
+
+Settings → Advanced → Developers → Linux → Turn on. Then in the terminal:
+```bash
+curl -fsSL https://raw.githubusercontent.com/rangersui/Elastik/master/get-elastik-go.sh | sh
+./elastik-go
+```
+
+Same Go Lite binary as above. Runs locally inside the Linux container.
+Open `http://localhost:3005` in Chrome — the Chromebook is now both
+server and client.
 
 ### Python Pro — full system
 

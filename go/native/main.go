@@ -55,6 +55,7 @@ type server struct {
 	cfg    config
 	db     *sqliteDB
 	static staticFiles
+	ai     aiConfig
 }
 
 const maxBody = 5 * 1024 * 1024
@@ -153,6 +154,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			list = []core.StageInfo{}
 		}
 		writeJSON(w, 200, list)
+		return
+	}
+
+	// ─── AI bridge routes ───────────────────────────────────────────
+	if path == "/ai/status" && r.Method == http.MethodGet {
+		s.handleAIStatus(w, r)
+		return
+	}
+	if path == "/ai/ask" {
+		s.handleAIAsk(w, r)
 		return
 	}
 
@@ -310,14 +321,16 @@ func main() {
 		log.Printf("  env: loaded %s", path)
 	}
 	cfg := loadConfig()
+	ai := detectAI()
 	s := &server{
 		cfg:    cfg,
 		db:     newSQLiteDB(cfg.dataDir),
 		static: loadStatic(),
+		ai:     ai,
 	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.host, cfg.port)
-	log.Printf("  elastik-lite (go) -> http://%s  [protocol + static]", addr)
+	log.Printf("  elastik-lite (go) -> http://%s  [protocol + static + ai]", addr)
 	log.Printf("  data dir: %s", cfg.dataDir)
 	if cfg.token == "" {
 		log.Printf("  ! ELASTIK_TOKEN not set — open access (dev mode)")

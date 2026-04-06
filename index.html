@@ -57,6 +57,17 @@ await pc.setRemoteDescription(offer);
 const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
 await fetch('/signal-'+_myId+'-to-'+peerId+'/write',{method:'POST',body:JSON.stringify(answer)});
 return pc}
+// --- AI input bar ---
+fetch('/ai/status').then(r=>r.json()).then(ai=>{if(ai.provider==='none')return;
+const bar=document.createElement('div');bar.style.cssText='position:fixed;bottom:0;left:0;right:0;padding:8px;background:#fff;border-top:1px solid #ddd;display:flex;gap:8px;z-index:9999;font-family:system-ui';
+const inp=document.createElement('input');inp.style.cssText='flex:1;padding:8px 12px;border:1px solid #ccc;border-radius:6px;font-size:14px;outline:none';inp.placeholder='Ask AI ('+ai.model+')...';
+const btn=document.createElement('button');btn.textContent='→';btn.style.cssText='padding:8px 14px;border:none;border-radius:6px;background:#111;color:#fff;cursor:pointer;font-size:14px';
+async function ask(){if(!inp.value.trim())return;const q=inp.value;inp.value='';btn.disabled=true;btn.textContent='…';
+try{const r=await fetch('/ai/ask?world='+encodeURIComponent(p),{method:'POST',body:q});if(r.ok){const t=await r.text();await fetch('/'+p+'/append',{method:'POST',body:t})}else{const e=await r.json();inp.value='Error: '+(e.error||'unknown')}}catch(e){inp.value='Error: '+e.message}
+btn.disabled=false;btn.textContent='→'}
+inp.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey)ask()};btn.onclick=ask;
+bar.append(inp,btn);document.body.appendChild(bar);f.style.height='calc(100% - 44px)'});
+// --- end AI input bar ---
 let _rtcWorld=null;
 async function readWorld(){
 if(_dc&&_dc.readyState==='open'){_dc.send(JSON.stringify({op:'read',world:p}));return _rtcWorld||await(await fetch('/'+p+'/read')).json()}
