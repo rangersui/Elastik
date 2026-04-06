@@ -1,6 +1,7 @@
 """elastik — the protocol. ~258 lines. Hand-copyable. The survivor's format."""
 import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, time
 from pathlib import Path
+import ai_bridge
 
 DATA = Path("data")
 # Load env file: .env, _env, .env.local (iOS doesn't support dotfiles)
@@ -13,6 +14,7 @@ for _ef in (".env", "_env", ".env.local"):
                 k, v = _line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
         break
+_ai_cfg = ai_bridge.detect_ai()
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
 HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
@@ -127,6 +129,34 @@ async def app(scope, receive, send):
         if redirect: extra_h.append([b"location", redirect.encode()]); status = 302
         if html_body: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
+
+    # ── AI routes ────────────────────────────────────────────────────
+    if path == "/ai/status" and method == "GET":
+        return await send_r(send, 200, json.dumps(ai_bridge.status_json(_ai_cfg)))
+    if path == "/ai/ask" and method == "POST":
+        if _ai_cfg["provider"] == "none":
+            return await send_r(send, 503, '{"error":"no AI provider — install ollama or set ANTHROPIC_API_KEY"}')
+        try: b = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        if not b.strip():
+            return await send_r(send, 400, '{"error":"empty prompt"}')
+        qs = scope.get("query_string", b"").decode()
+        params = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
+        world_name = params.get("world", "")
+        full_prompt = b
+        if world_name and _VALID_NAME.match(world_name):
+            try:
+                c = conn(world_name)
+                r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+                if r and r["stage_html"]:
+                    full_prompt = "Current content of this world:\n\n" + r["stage_html"] + "\n\n---\n\nUser request: " + b
+            except Exception:
+                pass
+        try:
+            response = ai_bridge.ask_ai(_ai_cfg, full_prompt)
+        except Exception as e:
+            return await send_r(send, 502, json.dumps({"error": f"ai: {e}"}))
+        return await send_r(send, 200, response, ct="text/plain; charset=utf-8")
 
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
