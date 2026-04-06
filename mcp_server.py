@@ -79,10 +79,47 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
 
 _configs = {}  # name -> server spec from json
 _config_mtime = 0  # last mtime of mcp_servers.json
+_config_source = ""  # "stage" or "file" -- for diagnostics
+
+
+def _try_load_config_from_stage():
+    """Try to read MCP config from elastik stage /config-mcp/read.
+    Returns parsed servers dict or None on any failure."""
+    try:
+        url = _DEFAULT_BASE + "/config-mcp/read"
+        req = Request(url, method="GET")
+        if TOKEN:
+            req.add_header("X-Auth-Token", TOKEN)
+        resp = urlopen(req, timeout=5)
+        data = json.loads(resp.read().decode())
+        raw = data.get("stage_html", "")
+        if not raw or not raw.strip():
+            return None
+        cfg = json.loads(raw)
+        servers = cfg.get("servers", {})
+        if not isinstance(servers, dict):
+            return None
+        return servers
+    except (HTTPError, URLError, json.JSONDecodeError, KeyError, TypeError,
+            ValueError, OSError):
+        return None
+
 
 def _reload_config():
-    """Re-read mcp_servers.json if changed on disk."""
-    global _config_mtime
+    """Load MCP server config. Tries elastik stage first, falls back to file."""
+    global _config_mtime, _config_source
+
+    # 1) Try stage
+    servers = _try_load_config_from_stage()
+    if servers is not None:
+        _configs.clear()
+        _configs.update(servers)
+        if _config_source != "stage":
+            _config_source = "stage"
+            print("  mcp config: loaded from stage /config-mcp", file=sys.stderr)
+        return
+
+    # 2) Fallback to file
     if not CONFIG.exists():
         return
     try:
@@ -94,6 +131,9 @@ def _reload_config():
         _configs.clear()
         for name, spec in cfg.get("servers", {}).items():
             _configs[name] = spec
+        if _config_source != "file":
+            _config_source = "file"
+            print("  mcp config: loaded from file conf/mcp_servers.json", file=sys.stderr)
     except (json.JSONDecodeError, OSError):
         pass
 
@@ -149,7 +189,8 @@ def _run_official():
                    target: str = "default", timeout: int = 30) -> str:
         """elastik HTTP interface -- hot-pluggable multi-target.
 
-        FIRST ACTION: call GET /info to discover all routes.
+        MANDATORY FIRST ACTION: call http('GET', '/info') to learn the system.
+        elastik is NOT FastAPI/Flask/Django — it is raw ASGI with a custom plugin system.
 
         Targets are configured in endpoints.json. Hot-pluggable: edit the file,
         next call picks it up -- zero restart. Use target="__list__" to see
@@ -211,7 +252,8 @@ def _run_mini():
         {
             "name": "http",
             "description": "elastik HTTP interface -- hot-pluggable multi-target. "
-                "FIRST ACTION: call GET /info to discover all routes. "
+                "MANDATORY FIRST ACTION: call http('GET', '/info') to learn the system. "
+                "elastik is NOT FastAPI/Flask/Django — it is raw ASGI with a custom plugin system. "
                 "Use target='__list__' to see all endpoints.",
             "inputSchema": {
                 "type": "object",
