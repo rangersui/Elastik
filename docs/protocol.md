@@ -160,6 +160,14 @@ hmac = HMAC-SHA256(key, prev_hmac + payload)
 Each event links to the previous. The chain is append-only.
 Tampering with any event breaks the chain.
 
+### Canonical key order
+
+Event payloads with multiple JSON keys use **alphabetical key order**
+(canonical form). This is the canonical encoding for HMAC computation.
+Go's `encoding/json` naturally produces alphabetical keys; Python uses
+`json.dumps(..., sort_keys=True)` to match. Both implementations
+produce byte-identical payloads, so either can verify the other's chain.
+
 ## Security
 
 - iframe sandbox: allow-scripts allow-popups (no allow-same-origin — null origin)

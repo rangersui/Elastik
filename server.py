@@ -68,7 +68,7 @@ def conn(name):
     return _db[name]
 
 def log_event(name, etype, payload=None):
-    c = conn(name); p = json.dumps(payload or {}, ensure_ascii=False)
+    c = conn(name); p = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
     row = c.execute("SELECT hmac FROM events ORDER BY id DESC LIMIT 1").fetchone()
     prev = row["hmac"] if row else ""
     h = _hmac.new(KEY, (prev + p).encode(), hashlib.sha256).hexdigest()
