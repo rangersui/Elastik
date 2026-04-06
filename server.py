@@ -21,6 +21,9 @@ MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
 OPENAPI = Path(__file__).with_name("openapi.json").read_text(encoding="utf-8")
 SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
+MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
+_icon_path = Path(__file__).with_name("icon.png")
+ICON = _icon_path.read_bytes() if _icon_path.exists() else None
 def _csp():
     cdn = "https:"
     try:
@@ -127,6 +130,11 @@ async def app(scope, receive, send):
 
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
+    if method == "GET" and path == "/manifest.json": return await send_r(send, 200, MANIFEST, "application/manifest+json")
+    if method == "GET" and path == "/icon.png" and ICON:
+        await send({"type":"http.response.start","status":200,"headers":[[b"content-type",b"image/png"]]})
+        await send({"type":"http.response.body","body":ICON})
+        return
     if method == "GET" and path == "/stages":
         stages = []
         if DATA.exists():
