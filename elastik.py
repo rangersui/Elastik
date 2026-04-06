@@ -281,6 +281,140 @@ def detect_tier():
     return info
 
 
+# ── AI backend detection ─────────────────────────────────────────────
+
+def _probe_local_port(port, path="/", timeout=2):
+    """Check if a local HTTP service responds. Returns response body or None."""
+    url = f"http://127.0.0.1:{port}{path}"
+    try:
+        resp = urllib.request.urlopen(url, timeout=timeout)
+        return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _detect_ollama():
+    """Detect Ollama on localhost:11434. Returns dict or None."""
+    body = _probe_local_port(11434, "/api/tags")
+    if body is None:
+        return None
+    info = {"name": "ollama", "endpoint": "http://127.0.0.1:11434"}
+    try:
+        data = json.loads(body)
+        models = data.get("models", [])
+        info["models"] = [m.get("name", "?") for m in models]
+    except (json.JSONDecodeError, KeyError):
+        info["models"] = []
+    return info
+
+
+def _detect_lm_studio():
+    """Detect LM Studio on localhost:1234. Returns dict or None."""
+    body = _probe_local_port(1234, "/v1/models")
+    if body is None:
+        return None
+    info = {"name": "lm-studio", "endpoint": "http://127.0.0.1:1234"}
+    try:
+        data = json.loads(body)
+        models = data.get("data", [])
+        info["models"] = [m.get("id", "?") for m in models]
+    except (json.JSONDecodeError, KeyError):
+        info["models"] = []
+    return info
+
+
+def _detect_api_keys():
+    """Check for known AI API keys in environment. Returns list of provider names."""
+    key_map = {
+        "ANTHROPIC_API_KEY": "anthropic",
+        "OPENAI_API_KEY": "openai",
+        "GOOGLE_API_KEY": "google",
+        "MISTRAL_API_KEY": "mistral",
+        "GROQ_API_KEY": "groq",
+        "TOGETHER_API_KEY": "together",
+        "DEEPSEEK_API_KEY": "deepseek",
+    }
+    # Also check .env file
+    env_keys = dict(os.environ)
+    env_file = os.path.join(ROOT, ".env")
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip()
+                        if k and v:
+                            env_keys.setdefault(k, v)
+        except Exception:
+            pass
+
+    found = []
+    for env_var, provider in key_map.items():
+        val = env_keys.get(env_var, "")
+        if val and len(val) > 8:  # skip obviously empty/placeholder values
+            found.append(provider)
+    return found
+
+
+def _detect_claude_desktop():
+    """Check if Claude Desktop config exists. Returns dict or None."""
+    system = platform.system()
+    candidates = []
+    if system == "Darwin":
+        candidates.append(os.path.expanduser(
+            "~/Library/Application Support/Claude/claude_desktop_config.json"))
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            candidates.append(os.path.join(appdata, "Claude", "claude_desktop_config.json"))
+    elif system == "Linux":
+        xdg = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        candidates.append(os.path.join(xdg, "Claude", "claude_desktop_config.json"))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            info = {"name": "claude-desktop", "config": path}
+            try:
+                with open(path) as f:
+                    cfg = json.load(f)
+                # Report MCP server count if present
+                mcp_servers = cfg.get("mcpServers", {})
+                if mcp_servers:
+                    info["mcp_servers"] = list(mcp_servers.keys())
+            except Exception:
+                pass
+            return info
+    return None
+
+
+def detect_ai_backends():
+    """Detect all available AI backends. Returns dict with findings."""
+    backends = {
+        "local": [],       # locally running inference servers
+        "api_keys": [],    # cloud API keys in env
+        "desktop": None,   # Claude Desktop config
+    }
+
+    # Local inference servers (probe in parallel would be nice but stdlib-only)
+    ollama = _detect_ollama()
+    if ollama:
+        backends["local"].append(ollama)
+
+    lm_studio = _detect_lm_studio()
+    if lm_studio:
+        backends["local"].append(lm_studio)
+
+    # API keys
+    backends["api_keys"] = _detect_api_keys()
+
+    # Claude Desktop
+    backends["desktop"] = _detect_claude_desktop()
+
+    return backends
+
+
 # ── server lifecycle ──────────────────────────────────────────────────
 
 def wait_for_port(port, host="127.0.0.1", timeout=30):
@@ -480,12 +614,45 @@ def main():
 
     print(f"  server    ready -> {url}")
 
-    # ── Phase 3: write tier info ──
+    # ── Phase 3: detect AI backends ──
+    if not args.skip_detect:
+        print("  detect    AI backends...")
+        ai_info = detect_ai_backends()
+
+        # Report local servers
+        for srv in ai_info["local"]:
+            models = srv.get("models", [])
+            model_str = ", ".join(models[:5]) if models else "no models listed"
+            if len(models) > 5:
+                model_str += f" (+{len(models) - 5} more)"
+            print(f"  ai        {srv['name']} @ {srv['endpoint']}  [{model_str}]")
+
+        # Report API keys
+        if ai_info["api_keys"]:
+            print(f"  ai        API keys: {', '.join(ai_info['api_keys'])}")
+
+        # Report Claude Desktop
+        if ai_info["desktop"]:
+            mcp = ai_info["desktop"].get("mcp_servers", [])
+            mcp_str = f"  mcp={','.join(mcp[:5])}" if mcp else ""
+            print(f"  ai        claude-desktop config found{mcp_str}")
+
+        if not ai_info["local"] and not ai_info["api_keys"] and not ai_info["desktop"]:
+            print("  ai        no backends detected")
+    else:
+        ai_info = None
+
+    # ── Phase 4: write tier info + AI backends ──
     if tier_info:
+        if ai_info:
+            tier_info["ai_backends"] = ai_info
         write_world(port, "tier-info", json.dumps(tier_info, indent=2))
         print(f"  tier-info written to world")
+    elif ai_info:
+        write_world(port, "ai-backend", json.dumps(ai_info, indent=2))
+        print(f"  ai-backend written to world")
 
-    # ── Phase 4: launch browser ──
+    # ── Phase 5: launch browser ──
     if args.headless:
         launch_headless(url)
     elif not args.no_browser:
@@ -493,9 +660,26 @@ def main():
     else:
         print("  browser   skipped (--no-browser)")
 
-    # ── Phase 5: keep running ──
+    # ── Phase 6: status summary ──
     print()
-    print(f"  elastik   running on {url}")
+    parts = [f"running on {url}"]
+    if tier_info:
+        parts.append(f"tier {tier_info['tier']}")
+    if ai_info:
+        n_local = len(ai_info["local"])
+        n_api = len(ai_info["api_keys"])
+        ai_parts = []
+        if n_local:
+            ai_parts.append(f"{n_local} local")
+        if n_api:
+            ai_parts.append(f"{n_api} API")
+        if ai_info["desktop"]:
+            ai_parts.append("claude-desktop")
+        if ai_parts:
+            parts.append(f"ai: {', '.join(ai_parts)}")
+        else:
+            parts.append("ai: none")
+    print(f"  elastik   {' | '.join(parts)}")
     print(f"            Ctrl+C to stop")
     print()
 
