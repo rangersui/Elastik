@@ -1,5 +1,5 @@
 """elastik — the protocol. ~258 lines. Hand-copyable. The survivor's format."""
-import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, time
+import asyncio, hashlib, hmac as _hmac, html, json, os, re, secrets, sqlite3, sys, time
 from pathlib import Path
 
 DATA = Path("data")
@@ -38,6 +38,15 @@ def _csp():
             f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
             f"connect-src 'self'; worker-src 'self'")
 _VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+
+def render_world_html(name, stage_html, version):
+    escaped = html.escape(stage_html) if stage_html else ""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{html.escape(name)}</title>
+<meta http-equiv="refresh" content="5"></head>
+<body><pre>{escaped}</pre>
+<footer>v{version}</footer>
+</body></html>"""
 _db = {}
 
 def conn(name):
@@ -158,6 +167,10 @@ async def app(scope, receive, send):
                 return await send_r(send, 404, '{"error":"world not found"}')
             c = conn(name)
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
+            qs = scope.get("query_string", b"").decode()
+            params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+            if params.get("render") == "html":
+                return await send_r(send, 200, render_world_html(name, r["stage_html"], r["version"]), ct="text/html")
             return await send_r(send, 200, json.dumps(dict(r)))
         c = conn(name)
         try: b = (await recv(receive)).decode("utf-8", "replace")

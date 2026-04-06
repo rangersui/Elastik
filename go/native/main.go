@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -69,6 +70,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func renderWorldHTML(w http.ResponseWriter, name string, stage core.Stage) {
+	escaped := html.EscapeString(stage.StageHTML)
+	out := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>%s</title>
+<meta http-equiv="refresh" content="5"></head>
+<body><pre>%s</pre>
+<footer>v%d</footer>
+</body></html>`, html.EscapeString(name), escaped, stage.Version)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(200)
+	fmt.Fprint(w, out)
 }
 
 // readBody enforces MAX_BODY and returns the raw bytes.
@@ -233,6 +247,10 @@ func (s *server) handleWorld(w http.ResponseWriter, r *http.Request, name, actio
 		if err != nil {
 			st, msg := mapError(err)
 			writeErr(w, st, msg)
+			return
+		}
+		if r.URL.Query().Get("render") == "html" {
+			renderWorldHTML(w, name, stage)
 			return
 		}
 		writeJSON(w, 200, stage)
