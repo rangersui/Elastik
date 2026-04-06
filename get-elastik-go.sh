@@ -118,7 +118,7 @@ echo "==> installed ./elastik-go (${tag})"
 raw="https://raw.githubusercontent.com/${REPO}/${tag}"
 echo "==> fetching frontend assets"
 fetched=0
-for f in index.html sw.js openapi.json manifest.json; do
+for f in index.html sw.js openapi.json manifest.json icon.png; do
     if curl -fsSL "${raw}/${f}" -o "./${f}" 2>/dev/null; then
         fetched=$((fetched + 1))
     else

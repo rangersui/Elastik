@@ -136,6 +136,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveManifest(w)
 		return
 	}
+	if r.Method == http.MethodGet && path == "/icon.png" {
+		s.serveIcon(w)
+		return
+	}
 
 	// /stages — list every world.
 	if r.Method == http.MethodGet && path == "/stages" {

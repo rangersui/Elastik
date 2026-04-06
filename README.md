@@ -54,7 +54,7 @@ GitHub Release, verifies its SHA-256, drops it in the current directory.
 No sudo. No admin rights. Nothing global. Delete the file to uninstall.
 
 Go Lite is the protocol only: worlds, HMAC chain, three mailboxes,
-static assets. No plugins, no MCP, no Claude Desktop integration.
+static assets, PWA install. No plugins, no MCP, no Claude Desktop integration.
 For that, use the Python path below.
 
 ### Python Pro — full system
@@ -451,7 +451,7 @@ server.py          ~258 lines    the protocol (testament format — hand-copyabl
 plugins.py         ~197 lines    plugin load/unload/cron/propose/approve
 boot.py             ~78 lines    startup orchestrator (server + plugins + sync)
 elastik.py         ~510 lines    launcher (detect + server + browser)
-index.html          ~25 lines    one iframe, one polling loop
+index.html          ~72 lines    one iframe, one polling loop, PWA manifest
 mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
 lucy.py            ~110 lines    CLI
 SKILLS.md                        AI behavior guide (read by MCP clients before /info)

@@ -115,7 +115,7 @@ try {
     $raw = "https://raw.githubusercontent.com/$Repo/$tag"
     Write-Host "==> fetching frontend assets"
     $fetched = 0
-    foreach ($f in @("index.html", "sw.js", "openapi.json", "manifest.json")) {
+    foreach ($f in @("index.html", "sw.js", "openapi.json", "manifest.json", "icon.png")) {
         try {
             Invoke-WebRequest -UseBasicParsing "$raw/$f" -OutFile ".\$f"
             $fetched++

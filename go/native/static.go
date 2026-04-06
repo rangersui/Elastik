@@ -21,6 +21,7 @@ type staticFiles struct {
 	openapi  []byte
 	sw       []byte
 	manifest []byte
+	icon     []byte
 }
 
 // loadStatic searches ELASTIK_STATIC, then CWD, then the exe dir, for
@@ -54,6 +55,7 @@ func loadStatic() staticFiles {
 		openapi:  find("openapi.json"),
 		sw:       find("sw.js"),
 		manifest: find("manifest.json"),
+		icon:     find("icon.png"),
 	}
 }
 
@@ -99,6 +101,16 @@ func (s *server) serveSW(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/javascript")
 	w.WriteHeader(200)
 	_, _ = w.Write(s.static.sw)
+}
+
+func (s *server) serveIcon(w http.ResponseWriter) {
+	if s.static.icon == nil {
+		writeErr(w, 404, "icon.png not found")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.WriteHeader(200)
+	_, _ = w.Write(s.static.icon)
 }
 
 func (s *server) serveManifest(w http.ResponseWriter) {
