@@ -1,9 +1,12 @@
 // AI bridge — built into the Go binary. No plugin, no Python.
 //
-// Startup detection order:
-//  1. ANTHROPIC_API_KEY → Claude API
-//  2. Ollama at OLLAMA_HOST (default http://localhost:11434)
-//  3. Nothing → print install hint
+// Startup detection order (first match wins):
+//  1. Ollama at OLLAMA_HOST (default http://localhost:11434)
+//  2. ANTHROPIC_API_KEY → Claude API
+//  3. OPENAI_API_KEY    → OpenAI API
+//  4. DEEPSEEK_API_KEY  → DeepSeek API (OpenAI-compatible)
+//  5. GOOGLE_API_KEY    → Google Gemini API
+//  6. Nothing           → print install hint
 //
 // Routes:
 //  POST /ai/ask?world={name}  → send prompt to AI, return response
@@ -27,7 +30,7 @@ import (
 // aiConfig describes the detected AI provider. Only exported fields
 // are included in /ai/status JSON; baseURL and apiKey stay private.
 type aiConfig struct {
-	Provider string `json:"provider"` // "ollama", "claude", "none"
+	Provider string `json:"provider"` // "ollama", "claude", "openai", "deepseek", "google", "none"
 	Model    string `json:"model"`
 	Status   string `json:"status"` // "connected", "no provider"
 	Hint     string `json:"hint,omitempty"`
@@ -40,17 +43,7 @@ var aiClient = &http.Client{Timeout: 120 * time.Second}
 // ─── detection ──────────────────────────────────────────────────────
 
 func detectAI() aiConfig {
-	// 1. Claude API key
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		model := env("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-		log.Printf("  ai: Claude API (%s)", model)
-		return aiConfig{
-			Provider: "claude", Model: model, Status: "connected",
-			apiKey: key,
-		}
-	}
-
-	// 2. Ollama
+	// 1. Ollama (local — lowest latency, no API key needed)
 	host := env("OLLAMA_HOST", "http://localhost:11434")
 	if models := probeOllama(host); len(models) > 0 {
 		model := resolveModel(env("OLLAMA_MODEL", ""), models)
@@ -61,11 +54,51 @@ func detectAI() aiConfig {
 		}
 	}
 
-	// 3. Nothing
+	// 2. Anthropic (Claude)
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		model := env("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+		log.Printf("  ai: Claude API (%s)", model)
+		return aiConfig{
+			Provider: "claude", Model: model, Status: "connected",
+			baseURL: "https://api.anthropic.com", apiKey: key,
+		}
+	}
+
+	// 3. OpenAI
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		model := env("OPENAI_MODEL", "gpt-4o-mini")
+		log.Printf("  ai: OpenAI API (%s)", model)
+		return aiConfig{
+			Provider: "openai", Model: model, Status: "connected",
+			baseURL: "https://api.openai.com", apiKey: key,
+		}
+	}
+
+	// 4. DeepSeek (OpenAI-compatible)
+	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
+		model := env("DEEPSEEK_MODEL", "deepseek-chat")
+		log.Printf("  ai: DeepSeek API (%s)", model)
+		return aiConfig{
+			Provider: "deepseek", Model: model, Status: "connected",
+			baseURL: "https://api.deepseek.com", apiKey: key,
+		}
+	}
+
+	// 5. Google (Gemini)
+	if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
+		model := env("GOOGLE_MODEL", "gemini-2.0-flash")
+		log.Printf("  ai: Google Gemini API (%s)", model)
+		return aiConfig{
+			Provider: "google", Model: model, Status: "connected",
+			baseURL: "https://generativelanguage.googleapis.com", apiKey: key,
+		}
+	}
+
+	// 6. Nothing
 	hint := "curl -fsSL https://ollama.com/install.sh | sh && ollama pull gemma3:4b"
 	log.Printf("  ai: no provider detected")
 	log.Printf("  ai: to add AI → %s", hint)
-	log.Printf("  ai: or set ANTHROPIC_API_KEY for Claude")
+	log.Printf("  ai: or set ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / GOOGLE_API_KEY")
 	return aiConfig{Provider: "none", Status: "no provider", Hint: hint}
 }
 
@@ -157,6 +190,12 @@ func (s *server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		response, err = askOllama(s.ai.baseURL, s.ai.Model, fullPrompt)
 	case "claude":
 		response, err = askClaude(s.ai.apiKey, s.ai.Model, fullPrompt)
+	case "openai":
+		response, err = askOpenAICompat(s.ai.baseURL, s.ai.apiKey, s.ai.Model, fullPrompt)
+	case "deepseek":
+		response, err = askOpenAICompat(s.ai.baseURL, s.ai.apiKey, s.ai.Model, fullPrompt)
+	case "google":
+		response, err = askGoogle(s.ai.baseURL, s.ai.apiKey, s.ai.Model, fullPrompt)
 	}
 	if err != nil {
 		writeErr(w, 502, fmt.Sprintf("ai: %v", err))
@@ -230,4 +269,82 @@ func askClaude(apiKey, model, prompt string) (string, error) {
 		return "", fmt.Errorf("claude: empty response")
 	}
 	return result.Content[0].Text, nil
+}
+
+// ─── OpenAI-compatible API (OpenAI, DeepSeek) ──────────────────────
+
+func askOpenAICompat(baseURL, apiKey, model, prompt string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 4096,
+		"messages":   []map[string]string{{"role": "user", "content": prompt}},
+	})
+	req, _ := http.NewRequest("POST", baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := aiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openai-compat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("openai-compat: %s %s", resp.Status, string(b))
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("openai-compat: %w", err)
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("openai-compat: empty response")
+	}
+	return result.Choices[0].Message.Content, nil
+}
+
+// ─── Google Gemini API ──────────────────────────────────────────────
+
+func askGoogle(baseURL, apiKey, model, prompt string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"contents": []map[string]any{
+			{"parts": []map[string]string{{"text": prompt}}},
+		},
+	})
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", baseURL, model, apiKey)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := aiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("google: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("google: %s %s", resp.Status, string(b))
+	}
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("google: %w", err)
+	}
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("google: empty response")
+	}
+	return result.Candidates[0].Content.Parts[0].Text, nil
 }

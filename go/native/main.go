@@ -200,6 +200,24 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "invalid world name")
 			return
 		}
+		// Welcome redirect: when hitting /, if the only worlds are
+		// "default" and "renderers-welcome", redirect to /default
+		// so the welcome renderer shows automatically.
+		if path == "/" {
+			if list, err := core.ListStages(s.db); err == nil && len(list) > 0 {
+				allDefault := true
+				for _, st := range list {
+					if st.Name != "default" && st.Name != "renderers-welcome" {
+						allDefault = false
+						break
+					}
+				}
+				if allDefault {
+					http.Redirect(w, r, "/default", http.StatusTemporaryRedirect)
+					return
+				}
+			}
+		}
 		s.serveIndex(w)
 		return
 	}
@@ -327,6 +345,10 @@ func main() {
 		db:     newSQLiteDB(cfg.dataDir),
 		static: loadStatic(),
 		ai:     ai,
+	}
+
+	if env("ELASTIK_WELCOME", "true") != "false" {
+		seedWelcome(s.db, cfg.key)
 	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.host, cfg.port)
