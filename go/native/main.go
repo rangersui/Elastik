@@ -156,6 +156,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Plugin routes — declared by plugins via --routes at startup.
+	if p, ok := routeTable[path]; ok {
+		servePlugin(w, r, p, path)
+		return
+	}
+
 	parts := splitPath(path)
 
 	// /{name}/{action} routes.
@@ -301,6 +307,8 @@ func main() {
 		db:     newSQLiteDB(cfg.dataDir),
 		static: loadStatic(),
 	}
+
+	scanPlugins()
 
 	addr := fmt.Sprintf("%s:%s", cfg.host, cfg.port)
 	log.Printf("  elastik-lite (go) -> http://%s  [protocol + static]", addr)
