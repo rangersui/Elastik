@@ -53,9 +53,14 @@ The script picks the right binary for your OS/arch from the latest
 GitHub Release, verifies its SHA-256, drops it in the current directory.
 No sudo. No admin rights. Nothing global. Delete the file to uninstall.
 
-Go Lite is the protocol only: worlds, HMAC chain, three mailboxes,
-static assets, PWA install. No plugins, no MCP, no Claude Desktop integration.
-For that, use the Python path below.
+Go Lite includes the protocol (worlds, HMAC chain, three mailboxes,
+static assets, PWA install) plus a CGI plugin system. Any `.py` or
+executable in `plugins/` that follows the 5-rule plugin spec works in
+both runtimes. Two-tier auth (X-Auth-Token / X-Approve-Token), hot
+reload (`POST /plugins/reload`). See `plugins/PLUGIN_SPEC.md`.
+
+For MCP gateway, Claude Desktop integration, and the full admin UI,
+use the Python path below.
 
 ### Python Pro — full system
 
