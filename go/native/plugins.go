@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Plugin protocol (5 rules):
@@ -31,7 +32,10 @@ type pluginResp struct {
 }
 
 // routeTable maps route path → plugin executable path.
-var routeTable = map[string]string{}
+var (
+	routeTable = map[string]string{}
+	routeMu    sync.RWMutex
+)
 
 // pluginCmd builds an exec.Cmd for a plugin. .py files run via python.
 func pluginCmd(path string, args ...string) *exec.Cmd {
@@ -50,6 +54,12 @@ func pluginExec(path string, args ...string) ([]byte, error) {
 
 // scanPlugins runs executables in plugins/ and plugins/available/ with --routes.
 func scanPlugins() {
+	routeMu.Lock()
+	// Clear and rebuild.
+	for k := range routeTable {
+		delete(routeTable, k)
+	}
+	defer routeMu.Unlock()
 	for _, dir := range []string{"plugins", filepath.Join("plugins", "available")} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {

@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/elastik/go/core"
@@ -156,8 +157,38 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hot reload endpoint.
+	if path == "/plugins/reload" && r.Method == http.MethodPost {
+		scanPlugins()
+		routeMu.RLock()
+		names := make([]string, 0, len(routeTable))
+		for route := range routeTable {
+			names = append(names, route)
+		}
+		routeMu.RUnlock()
+		writeJSON(w, 200, map[string]any{"ok": true, "routes": names})
+		return
+	}
+	if path == "/plugins/list" && r.Method == http.MethodGet {
+		routeMu.RLock()
+		type entry struct {
+			Route  string `json:"route"`
+			Plugin string `json:"plugin"`
+		}
+		var list []entry
+		for route, plug := range routeTable {
+			list = append(list, entry{route, filepath.Base(plug)})
+		}
+		routeMu.RUnlock()
+		writeJSON(w, 200, list)
+		return
+	}
+
 	// Plugin routes — declared by plugins via --routes at startup.
-	if p, ok := routeTable[path]; ok {
+	routeMu.RLock()
+	p, ok := routeTable[path]
+	routeMu.RUnlock()
+	if ok {
 		servePlugin(w, r, p, path)
 		return
 	}
