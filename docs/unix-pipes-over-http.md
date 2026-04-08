@@ -94,6 +94,24 @@ Promise.all([
 
 No service mesh. No message bus. Just HTTP.
 
+## HTTP is the bus
+
+Traditional OS has multiple buses: memory, PCIe, USB, SATA. Different protocols, different speeds, different drivers.
+
+elastik has one bus: HTTP.
+
+```
+browser  → daemon    HTTP
+plugin   → daemon    stdin/stdout (local HTTP equivalent)
+daemon   → daemon    HTTP
+AI       → daemon    HTTP (MCP)
+phone    → daemon    HTTP
+```
+
+One protocol. No drivers. A Raspberry Pi and a Mac Studio speak the same bus. A browser tab and a Python plugin speak the same bus. There is nothing to configure because there is only one thing.
+
+stdin/stdout is the local degenerate case of HTTP — same semantics (request in, response out), zero network overhead. That's why CGI plugins work: they're HTTP over file descriptors.
+
 ## Install
 
 Not loaded by default. Load it:
