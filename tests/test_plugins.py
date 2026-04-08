@@ -17,7 +17,7 @@ import json, os, subprocess, sys, time, urllib.request, urllib.error, signal
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
-EXE_NAME = "elastik-lite.exe" if sys.platform == "win32" else "elastik-lite"
+EXE_NAME = "elastik.exe" if sys.platform == "win32" else "elastik"
 
 PASS = 0
 FAIL = 0
@@ -591,6 +591,62 @@ def _run_devtools_tests(port, label, token=""):
          st == 200 and len(body.strip()) > 0,
          f"status={st} body={body[:40]}")
 
+    # /grep: write a test world, search it, clean up
+    _grep_world = "grep-integration-test"
+    _grep_content = "line one alpha\nline two NEEDLE beta\nline three gamma"
+    # Write test data
+    st, _ = http_post(port, f"/{_grep_world}/write", _grep_content, token=token)
+    if st == 200:
+        # grep default mode: line-level matches (world:lineno:content)
+        st, body = http_get(port, "/grep?q=NEEDLE")
+        test(f"{label} devtools: /grep default -> line match",
+             st == 200 and f"{_grep_world}:2:" in body and "NEEDLE" in body,
+             f"status={st} body={body[:100]}")
+
+        # grep -l mode: filenames only
+        st, body = http_get(port, "/grep?q=NEEDLE&mode=l")
+        test(f"{label} devtools: /grep?mode=l -> filename list",
+             st == 200 and _grep_world in body,
+             f"status={st} body={body[:100]}")
+
+        # grep no match
+        st, body = http_get(port, "/grep?q=ZZZZNOTFOUND")
+        test(f"{label} devtools: /grep no match -> empty",
+             st == 200 and body.strip() == "",
+             f"status={st} body={body[:60]}")
+
+        # grep missing ?q=
+        st, body = http_get(port, "/grep")
+        test(f"{label} devtools: /grep no ?q= -> 400",
+             st == 400,
+             f"status={st}")
+
+        # /head: first N lines
+        st, body = http_post(port, f"/head?world={_grep_world}&n=1", "", token=token)
+        test(f"{label} devtools: /head?n=1 -> first line",
+             st == 200 and "alpha" in body and "NEEDLE" not in body,
+             f"status={st} body={body[:80]}")
+
+        # /tail: last N lines
+        st, body = http_post(port, f"/tail?world={_grep_world}&n=1", "", token=token)
+        test(f"{label} devtools: /tail?n=1 -> last line",
+             st == 200 and "gamma" in body and "NEEDLE" not in body,
+             f"status={st} body={body[:80]}")
+
+        # /wc: line/word/byte counts
+        st, body = http_post(port, f"/wc?world={_grep_world}", "", token=token)
+        if st == 200:
+            try:
+                d = json.loads(body)
+                test(f"{label} devtools: /wc -> 3 lines",
+                     d.get("lines") == 3, f"got {d}")
+            except json.JSONDecodeError:
+                test(f"{label} devtools: /wc JSON", False, body[:80])
+        else:
+            test(f"{label} devtools: /wc -> 200", False, f"status={st}")
+    else:
+        test(f"{label} devtools: grep setup (write world)", False, f"write status={st}")
+
 
 def _run_auth_tests(port, label, token, approve):
     """Auth enforcement tests — shared by Go and Python."""
@@ -639,6 +695,25 @@ def _run_auth_tests(port, label, token, approve):
 
         st, _ = http_post(port, "/plugins/reload", token=token)
         test(f"{label} auth: POST /plugins/reload auth -> 200", st == 200, f"status={st}")
+
+    # ── Tier 1: /proxy/* requires approve token (postman = curl proxy) ──
+
+    # POST /proxy/postman with no token -> 403
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}')
+    test(f"{label} auth: POST /proxy/postman no token -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with auth token only -> 403 (needs approve, not auth)
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', token=token)
+    test(f"{label} auth: POST /proxy/postman auth-only -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with wrong approve -> 403
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve="wrong")
+    test(f"{label} auth: POST /proxy/postman wrong approve -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with correct approve -> passes auth (not 403)
+    # Go returns 404 (route not registered — Python-only plugin), Python returns 200
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve=approve)
+    test(f"{label} auth: POST /proxy/postman approve -> not 403", st != 403, f"status={st}")
 
     # ── Normal world with auth token should work ──
 
@@ -878,6 +953,28 @@ def test_parity():
             test("parity: /time within 5s",
                  abs(int(go_body.strip()) - int(py_body.strip())) < 5,
                  f"go={go_body.strip()} py={py_body.strip()}")
+
+        # /grep — write a world on both, grep on both, compare
+        _pw = "parity-grep-test"
+        _pc = "parity line one\nparity NEEDLE two\nparity line three"
+        go_ws, _ = http_post(go_port, f"/{_pw}/write", _pc, token=parity_token)
+        py_ws, _ = http_post(py_port, f"/{_pw}/write", _pc, token=parity_token)
+        if go_ws == 200 and py_ws == 200:
+            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE")
+            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE")
+            test("parity: /grep same status", go_st == py_st == 200,
+                 f"go={go_st} py={py_st}")
+            test("parity: /grep both find NEEDLE",
+                 "NEEDLE" in go_body and "NEEDLE" in py_body,
+                 f"go={go_body[:60]} py={py_body[:60]}")
+            # mode=l
+            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE&mode=l")
+            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE&mode=l")
+            test("parity: /grep?mode=l same status", go_st == py_st == 200,
+                 f"go={go_st} py={py_st}")
+            test("parity: /grep?mode=l both list world",
+                 _pw in go_body and _pw in py_body,
+                 f"go={go_body[:60]} py={py_body[:60]}")
 
     finally:
         go_proc.terminate()

@@ -12,8 +12,8 @@ async def auth_middleware(scope, path, method):
     # GET always open
     if method == "GET": return True
     parts = [p for p in path.split("/") if p]
-    # Admin + config worlds = approve token required — checked FIRST, before any bypass
-    if path.startswith("/admin/") or (len(parts) >= 1 and parts[0].startswith("config-") and method == "POST"):
+    # Admin + config + postman = approve token required — checked FIRST, before any bypass
+    if path.startswith("/admin/") or path == "/proxy/postman" or (len(parts) >= 1 and parts[0].startswith("config-") and method == "POST"):
         approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
         if not approve: return False  # no approve token = locked
         headers = dict(scope.get("headers", []))

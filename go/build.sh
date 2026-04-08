@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build elastik Go native server. Output: ../elastik-go (or .exe on Windows)
+# Build elastik Go native server. Output: ../elastik (or .exe on Windows)
 set -e
 cd "$(dirname "$0")"
-OUT="../elastik-go"
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) OUT="../elastik-go.exe";; esac
+OUT="../elastik"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) OUT="../elastik.exe";; esac
 echo "Building $OUT..."
 go build -o "$OUT" ./native
 echo "OK  -> $OUT"
