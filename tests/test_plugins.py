@@ -387,119 +387,8 @@ def _run_adversarial_tests(port, token):
     test("adversarial: server alive after cthulhu", st == 200,
          f"status={st}")
 
-    # ── devtools route tests (via Go HTTP) ──
-    # Run BEFORE slow adversarial tests (slowdrip/forkbomb) which
-    # can destabilize the server with orphan processes on Windows.
-    print(f"\n  --- devtools Go HTTP tests ---")
-
-    # /wc-c: upload byte counter
-    big = "x" * 50000
-    st, body = http_post(port, "/wc-c", big, token=token)
-    test("devtools: POST /wc-c -> byte count", st == 200 and body.strip() == "50000",
-         f"status={st} body={body[:40]}")
-
-    # /full: always 507
-    st, body = http_get(port, "/full")
-    test("devtools: GET /full -> 507", st == 507, f"status={st}")
-
-    # /true: always 200
-    st, _ = http_get(port, "/true")
-    test("devtools: GET /true -> 200", st == 200, f"status={st}")
-
-    # /false: always 403
-    st, _ = http_get(port, "/false")
-    test("devtools: GET /false -> 403", st == 403, f"status={st}")
-
-    # /yes: returns 'yes' n times
-    st, body = http_get(port, "/yes?n=3")
-    test("devtools: GET /yes?n=3 -> 3 lines", st == 200 and body.strip() == "yes\nyes\nyes",
-         f"status={st} body={body[:40]}")
-
-    # /health: ok + uptime
-    st, body = http_get(port, "/health")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test("devtools: /health has ok", d.get("ok") is True)
-            test("devtools: /health has uptime", "uptime" in d)
-        except json.JSONDecodeError:
-            test("devtools: /health JSON", False, body[:80])
-    else:
-        test("devtools: GET /health -> 200", False, f"status={st}")
-
-    # /whoami: isolation mirror — must have pid, user, env
-    st, body = http_get(port, "/whoami")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test("devtools: /whoami has pid", "pid" in d)
-            test("devtools: /whoami has user", "user" in d)
-            test("devtools: /whoami has env", "env" in d)
-            test("devtools: /whoami has env_count", "env_count" in d)
-        except json.JSONDecodeError:
-            test("devtools: /whoami JSON", False, body[:80])
-    else:
-        test("devtools: GET /whoami -> 200", False, f"status={st}")
-
-    # /verify: structural integrity
-    st, body = http_get(port, "/verify")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test("devtools: /verify has ok", "ok" in d)
-        except json.JSONDecodeError:
-            test("devtools: /verify JSON", False, body[:80])
-    else:
-        test("devtools: GET /verify -> 200", False, f"status={st}")
-
-    # /config/dump: sanitized config
-    st, body = http_get(port, "/config/dump")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test("devtools: /config/dump has pid", "pid" in d)
-            test("devtools: /config/dump token_set", "token_set" in d)
-        except json.JSONDecodeError:
-            test("devtools: /config/dump JSON", False, body[:80])
-    else:
-        test("devtools: GET /config/dump -> 200", False, f"status={st}")
-
-    # /uuid: returns valid UUID
-    st, body = http_get(port, "/uuid")
-    test("devtools: GET /uuid -> 200", st == 200, f"status={st}")
-    if st == 200:
-        import re
-        test("devtools: /uuid is valid UUID",
-             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-                           body.strip())),
-             f"got: {body[:50]}")
-
-    # /cowsay: ASCII art
-    st, body = http_get(port, "/cowsay?say=test")
-    test("devtools: GET /cowsay -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test("devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
-
-    # /time: Unix epoch timestamp
-    st, body = http_get(port, "/time")
-    test("devtools: GET /time -> 200", st == 200, f"status={st}")
-    if st == 200:
-        ts = int(body.strip())
-        now = int(time.time())
-        test("devtools: /time within 5s of local clock",
-             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
-
-    # /rev: reverse bytes — UTF-8 torture test
-    st, body = http_post(port, "/rev", "hello", token=token)
-    test("devtools: POST /rev 'hello' -> 'olleh'",
-         st == 200 and body.strip() == "olleh",
-         f"status={st} body={body[:40]}")
-
-    # /rev with emoji — pipeline encoding test
-    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
-    test("devtools: POST /rev emoji round-trip",
-         st == 200 and len(body.strip()) > 0,
-         f"status={st} body={body[:40]}")
+    # ── devtools route tests ──
+    _run_devtools_tests(port, "go", token=token)
 
     # ── Slow adversarial tests (30s+ each) ──
     # These go LAST because forceful process kills can destabilize Go on Windows.
@@ -544,14 +433,15 @@ def _run_adversarial_tests(port, token):
 def test_python():
     print("\n=== Layer 3: Python HTTP Integration ===")
 
-    # Ensure ai plugin is installed for testing
+    # Ensure ai + devtools plugins are installed for testing
     import shutil
-    ai_src = os.path.join(ROOT, "plugins", "available", "ai.py")
-    ai_dst = os.path.join(ROOT, "plugins", "ai.py")
-    _installed_ai = False
-    if os.path.exists(ai_src) and not os.path.exists(ai_dst):
-        shutil.copy2(ai_src, ai_dst)
-        _installed_ai = True
+    _installed = []
+    for pname in ["ai.py", "devtools.py"]:
+        src = os.path.join(ROOT, "plugins", "available", pname)
+        dst = os.path.join(ROOT, "plugins", pname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            _installed.append(dst)
 
     py_port = 13007
     py_token = "test-py-token"
@@ -574,15 +464,132 @@ def test_python():
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
         _run_http_tests(py_port, "python", token=py_token)
+        _run_devtools_tests(py_port, "python", token=py_token)
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # Clean up test-installed ai plugin
-        if _installed_ai and os.path.exists(ai_dst):
-            os.remove(ai_dst)
+        # Clean up test-installed plugins
+        for p in _installed:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def _run_devtools_tests(port, label, token=""):
+    """Devtools route tests — shared by Go and Python servers."""
+    print(f"\n  --- devtools {label} HTTP tests ---")
+
+    # /wc-c: upload byte counter
+    big = "x" * 50000
+    st, body = http_post(port, "/wc-c", big, token=token)
+    test(f"{label} devtools: POST /wc-c -> byte count",
+         st == 200 and body.strip() == "50000",
+         f"status={st} body={body[:40]}")
+
+    # /full: always 507
+    st, body = http_get(port, "/full")
+    test(f"{label} devtools: GET /full -> 507", st == 507, f"status={st}")
+
+    # /true: always 200
+    st, _ = http_get(port, "/true")
+    test(f"{label} devtools: GET /true -> 200", st == 200, f"status={st}")
+
+    # /false: always 403
+    st, _ = http_get(port, "/false")
+    test(f"{label} devtools: GET /false -> 403", st == 403, f"status={st}")
+
+    # /yes: returns 'yes' n times
+    st, body = http_get(port, "/yes?n=3")
+    test(f"{label} devtools: GET /yes?n=3 -> 3 lines",
+         st == 200 and body.strip() == "yes\nyes\nyes",
+         f"status={st} body={body[:40]}")
+
+    # /health: ok + uptime
+    st, body = http_get(port, "/health")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /health has ok", d.get("ok") is True)
+            test(f"{label} devtools: /health has uptime", "uptime" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /health JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /health -> 200", False, f"status={st}")
+
+    # /whoami: isolation mirror
+    st, body = http_get(port, "/whoami")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /whoami has pid", "pid" in d)
+            test(f"{label} devtools: /whoami has user", "user" in d)
+            test(f"{label} devtools: /whoami has env", "env" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /whoami JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /whoami -> 200", False, f"status={st}")
+
+    # /verify: structural integrity
+    st, body = http_get(port, "/verify")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /verify has ok", "ok" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /verify JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /verify -> 200", False, f"status={st}")
+
+    # /config/dump: sanitized config
+    st, body = http_get(port, "/config/dump")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /config/dump has pid", "pid" in d)
+            test(f"{label} devtools: /config/dump token_set", "token_set" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /config/dump JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /config/dump -> 200", False, f"status={st}")
+
+    # /uuid: returns valid UUID
+    st, body = http_get(port, "/uuid")
+    test(f"{label} devtools: GET /uuid -> 200", st == 200, f"status={st}")
+    if st == 200:
+        import re
+        test(f"{label} devtools: /uuid is valid UUID",
+             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+                           body.strip())),
+             f"got: {body[:50]}")
+
+    # /cowsay: ASCII art
+    st, body = http_get(port, "/cowsay?say=test")
+    test(f"{label} devtools: GET /cowsay -> 200", st == 200, f"status={st}")
+    if st == 200:
+        test(f"{label} devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
+
+    # /time: Unix epoch timestamp
+    st, body = http_get(port, "/time")
+    test(f"{label} devtools: GET /time -> 200", st == 200, f"status={st}")
+    if st == 200:
+        ts = int(body.strip())
+        now = int(time.time())
+        test(f"{label} devtools: /time within 5s of local clock",
+             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
+
+    # /rev: reverse bytes
+    st, body = http_post(port, "/rev", "hello", token=token)
+    test(f"{label} devtools: POST /rev 'hello' -> 'olleh'",
+         st == 200 and body.strip() == "olleh",
+         f"status={st} body={body[:40]}")
+
+    # /rev with emoji
+    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
+    test(f"{label} devtools: POST /rev emoji round-trip",
+         st == 200 and len(body.strip()) > 0,
+         f"status={st} body={body[:40]}")
 
 
 def _run_auth_tests(port, label, token, approve):
@@ -729,14 +736,15 @@ def test_parity():
     env_py["ELASTIK_TOKEN"] = parity_token
     env_py["ELASTIK_APPROVE_TOKEN"] = parity_approve
 
-    # Install ai plugin for Python
+    # Install ai + devtools plugins for Python
     import shutil
-    ai_src = os.path.join(ROOT, "plugins", "available", "ai.py")
-    ai_dst = os.path.join(ROOT, "plugins", "ai.py")
-    _installed_ai = False
-    if os.path.exists(ai_src) and not os.path.exists(ai_dst):
-        shutil.copy2(ai_src, ai_dst)
-        _installed_ai = True
+    _parity_installed = []
+    for pname in ["ai.py", "devtools.py"]:
+        src = os.path.join(ROOT, "plugins", "available", pname)
+        dst = os.path.join(ROOT, "plugins", pname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            _parity_installed.append(dst)
 
     go_proc = subprocess.Popen(
         [exe], env=env_go, cwd=ROOT,
@@ -823,6 +831,54 @@ def test_parity():
         go_st, _ = http_post(go_port, "/plugins/reload", token=parity_token)
         test("parity: go reload auth -> 200", go_st == 200, f"go={go_st}")
 
+        # ── Devtools parity ──
+        # Both runtimes should serve the same devtools routes with same behavior
+
+        # /health
+        go_st, go_body = http_get(go_port, "/health")
+        py_st, py_body = http_get(py_port, "/health")
+        test("parity: /health same status", go_st == py_st, f"go={go_st} py={py_st}")
+
+        # /true
+        go_st, _ = http_get(go_port, "/true")
+        py_st, _ = http_get(py_port, "/true")
+        test("parity: /true same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+
+        # /false
+        go_st, _ = http_get(go_port, "/false")
+        py_st, _ = http_get(py_port, "/false")
+        test("parity: /false same status", go_st == py_st == 403, f"go={go_st} py={py_st}")
+
+        # /full
+        go_st, _ = http_get(go_port, "/full")
+        py_st, _ = http_get(py_port, "/full")
+        test("parity: /full same status", go_st == py_st == 507, f"go={go_st} py={py_st}")
+
+        # /rev
+        go_st, go_body = http_post(go_port, "/rev", "hello", token=parity_token)
+        py_st, py_body = http_post(py_port, "/rev", "hello", token=parity_token)
+        test("parity: /rev same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        test("parity: /rev same body",
+             go_body.strip() == py_body.strip() == "olleh",
+             f"go={go_body[:20]} py={py_body[:20]}")
+
+        # /wc-c
+        go_st, go_body = http_post(go_port, "/wc-c", "test123", token=parity_token)
+        py_st, py_body = http_post(py_port, "/wc-c", "test123", token=parity_token)
+        test("parity: /wc-c same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        test("parity: /wc-c same count",
+             go_body.strip() == py_body.strip() == "7",
+             f"go={go_body[:10]} py={py_body[:10]}")
+
+        # /time — both should return timestamps within 5s of each other
+        go_st, go_body = http_get(go_port, "/time")
+        py_st, py_body = http_get(py_port, "/time")
+        test("parity: /time same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        if go_st == 200 and py_st == 200:
+            test("parity: /time within 5s",
+                 abs(int(go_body.strip()) - int(py_body.strip())) < 5,
+                 f"go={go_body.strip()} py={py_body.strip()}")
+
     finally:
         go_proc.terminate()
         py_proc.terminate()
@@ -831,8 +887,9 @@ def test_parity():
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
-        if _installed_ai and os.path.exists(ai_dst):
-            os.remove(ai_dst)
+        for p in _parity_installed:
+            if os.path.exists(p):
+                os.remove(p)
 
 
 # ── Main ────────────────────────────────────────────────────────────
