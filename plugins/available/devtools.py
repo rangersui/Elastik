@@ -1,0 +1,218 @@
+"""Devtools — Unix pipe primitives as HTTP routes.
+
+fetch('/grep?q=error').then(r=>r.json())  → grep
+  .then(ws=>fetch('/tail?world='+ws[0]+'&n=5')).then(r=>r.text())  → tail
+  .then(t=>__elastik.sync(t))  → write back
+
+Not loaded by default. Load with: POST /admin/load  body=devtools
+"""
+DESCRIPTION = "Unix pipe primitives — grep, tail, head, wc, null, mirror, health, db/size"
+
+import sys, json, os, time, sqlite3
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent.parent
+_DATA = _ROOT / "data"
+_START = time.time()
+
+
+def _read_stage(world):
+    """Read stage_html from a world's universe.db. Direct sqlite, no conn()."""
+    db = _DATA / world / "universe.db"
+    if not db.exists():
+        return None
+    c = sqlite3.connect(str(db))
+    c.row_factory = sqlite3.Row
+    r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+    c.close()
+    return r["stage_html"] if r else ""
+
+
+def _world_names():
+    """List all world directory names that have a universe.db."""
+    if not _DATA.exists():
+        return []
+    return sorted(d.name for d in _DATA.iterdir()
+                  if d.is_dir() and (d / "universe.db").exists())
+
+
+# ── handlers (Python in-process) ─────────────────────────────────────
+
+async def handle_grep(method, body, params):
+    """Search all worlds for a query string. Returns matching world names."""
+    q = params.get("q", "")
+    if not q:
+        return {"error": "?q= required", "_status": 400}
+    matches = []
+    for name in _world_names():
+        stage = _read_stage(name)
+        if stage and q in stage:
+            matches.append(name)
+    return {"_html": json.dumps(matches), "_status": 200}
+
+
+async def handle_tail(method, body, params):
+    """Last n lines of a world's stage. ?world=x&n=10"""
+    world = params.get("world", "")
+    if not world:
+        return {"error": "?world= required", "_status": 400}
+    stage = _read_stage(world)
+    if stage is None:
+        return {"error": "world not found", "_status": 404}
+    n = int(params.get("n", "10"))
+    lines = stage.splitlines()[-n:]
+    return {"_html": "\n".join(lines), "_status": 200}
+
+
+async def handle_head(method, body, params):
+    """First n lines of a world's stage. ?world=x&n=10"""
+    world = params.get("world", "")
+    if not world:
+        return {"error": "?world= required", "_status": 400}
+    stage = _read_stage(world)
+    if stage is None:
+        return {"error": "world not found", "_status": 404}
+    n = int(params.get("n", "10"))
+    lines = stage.splitlines()[:n]
+    return {"_html": "\n".join(lines), "_status": 200}
+
+
+async def handle_wc(method, body, params):
+    """Word/line/byte count for a world's stage. ?world=x"""
+    world = params.get("world", "")
+    if not world:
+        return {"error": "?world= required", "_status": 400}
+    stage = _read_stage(world)
+    if stage is None:
+        return {"error": "world not found", "_status": 404}
+    return {"lines": len(stage.splitlines()), "words": len(stage.split()),
+            "bytes": len(stage.encode()), "_status": 200}
+
+
+async def handle_null(method, body, params):
+    """/dev/null — swallow anything, return 200."""
+    return {"_status": 204, "_html": ""}
+
+
+async def handle_mirror(method, body, params):
+    """Echo back the raw request — method, params, body."""
+    text = body if isinstance(body, str) else body.decode("utf-8", "replace")
+    return {"method": method, "params": {k: v for k, v in params.items() if k != "_scope"},
+            "body": text, "_status": 200}
+
+
+async def handle_health(method, body, params):
+    """Health check — ok + uptime."""
+    return {"ok": True, "uptime": round(time.time() - _START, 1), "_status": 200}
+
+
+async def handle_db_size(method, body, params):
+    """Storage usage per world."""
+    sizes = {}
+    total = 0
+    for name in _world_names():
+        db = _DATA / name / "universe.db"
+        sz = db.stat().st_size if db.exists() else 0
+        sizes[name] = sz
+        total += sz
+    def fmt(b):
+        if b >= 1048576: return f"{b/1048576:.1f}MB"
+        if b >= 1024: return f"{b/1024:.1f}KB"
+        return f"{b}B"
+    return {"worlds": {k: fmt(v) for k, v in sizes.items()},
+            "total": fmt(total), "count": len(sizes), "_status": 200}
+
+
+ROUTES = {
+    "/grep": handle_grep,
+    "/tail": handle_tail,
+    "/head": handle_head,
+    "/wc": handle_wc,
+    "/null": handle_null,
+    "/mirror": handle_mirror,
+    "/health": handle_health,
+    "/db/size": handle_db_size,
+}
+
+
+# ── Go CGI entry point ───────────────────────────────────────────────
+
+def _cgi_dispatch(d):
+    """Synchronous CGI dispatch — mirrors the async handlers above."""
+    path, method = d["path"], d.get("method", "GET")
+    body = d.get("body", "")
+    qs = d.get("query", "")
+    params = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
+
+    if path == "/grep":
+        q = params.get("q", "")
+        if not q:
+            return {"status": 400, "body": json.dumps({"error": "?q= required"})}
+        matches = [n for n in _world_names() if q in (_read_stage(n) or "")]
+        return {"status": 200, "body": json.dumps(matches)}
+
+    if path == "/tail":
+        world = params.get("world", "")
+        if not world:
+            return {"status": 400, "body": json.dumps({"error": "?world= required"})}
+        stage = _read_stage(world)
+        if stage is None:
+            return {"status": 404, "body": json.dumps({"error": "world not found"})}
+        n = int(params.get("n", "10"))
+        return {"status": 200, "body": "\n".join(stage.splitlines()[-n:]),
+                "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/head":
+        world = params.get("world", "")
+        if not world:
+            return {"status": 400, "body": json.dumps({"error": "?world= required"})}
+        stage = _read_stage(world)
+        if stage is None:
+            return {"status": 404, "body": json.dumps({"error": "world not found"})}
+        n = int(params.get("n", "10"))
+        return {"status": 200, "body": "\n".join(stage.splitlines()[:n]),
+                "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/wc":
+        world = params.get("world", "")
+        if not world:
+            return {"status": 400, "body": json.dumps({"error": "?world= required"})}
+        stage = _read_stage(world)
+        if stage is None:
+            return {"status": 404, "body": json.dumps({"error": "world not found"})}
+        return {"status": 200, "body": json.dumps({"lines": len(stage.splitlines()),
+                "words": len(stage.split()), "bytes": len(stage.encode())})}
+
+    if path == "/null":
+        return {"status": 204, "body": ""}
+
+    if path == "/mirror":
+        return {"status": 200, "body": json.dumps({"method": method, "params": params, "body": body})}
+
+    if path == "/health":
+        return {"status": 200, "body": json.dumps({"ok": True, "uptime": round(time.time() - _START, 1)})}
+
+    if path == "/db/size":
+        sizes = {}
+        total = 0
+        for name in _world_names():
+            db = _DATA / name / "universe.db"
+            sz = db.stat().st_size if db.exists() else 0
+            sizes[name] = sz
+            total += sz
+        def fmt(b):
+            if b >= 1048576: return f"{b/1048576:.1f}MB"
+            if b >= 1024: return f"{b/1024:.1f}KB"
+            return f"{b}B"
+        return {"status": 200, "body": json.dumps({"worlds": {k: fmt(v) for k, v in sizes.items()},
+                "total": fmt(total), "count": len(sizes)})}
+
+    return {"status": 404, "body": json.dumps({"error": "not found"})}
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--routes":
+        print(json.dumps(list(ROUTES.keys())))
+        sys.exit(0)
+    d = json.loads(sys.stdin.readline())
+    print(json.dumps(_cgi_dispatch(d)))
