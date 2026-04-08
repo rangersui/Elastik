@@ -122,6 +122,26 @@ async def handle_db_size(method, body, params):
             "total": fmt(total), "count": len(sizes), "_status": 200}
 
 
+_COW = r"""
+ {border}
+< {msg} >
+ {border}
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
+"""[1:-1]  # strip leading/trailing newline
+
+
+async def handle_cowsay(method, body, params):
+    """cowsay — if the cow renders intact, your encoding is fine."""
+    text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "moo"
+    n = max(len(text), 2)
+    cow = _COW.format(msg=text.ljust(n), border="-" * (n + 2))
+    return {"_html": cow, "_status": 200}
+
+
 ROUTES = {
     "/grep": handle_grep,
     "/tail": handle_tail,
@@ -131,6 +151,7 @@ ROUTES = {
     "/echo": handle_echo,
     "/health": handle_health,
     "/db/size": handle_db_size,
+    "/cowsay": handle_cowsay,
 }
 
 
@@ -205,6 +226,12 @@ def _cgi_dispatch(d):
             return f"{b}B"
         return {"status": 200, "body": json.dumps({"worlds": {k: fmt(v) for k, v in sizes.items()},
                 "total": fmt(total), "count": len(sizes)})}
+
+    if path == "/cowsay":
+        text = params.get("say", "") or body or "moo"
+        n = max(len(text), 2)
+        cow = _COW.format(msg=text.ljust(n), border="-" * (n + 2))
+        return {"status": 200, "body": cow, "content_type": "text/plain; charset=utf-8"}
 
     return {"status": 404, "body": json.dumps({"error": "not found"})}
 
