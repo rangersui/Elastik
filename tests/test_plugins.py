@@ -53,10 +53,10 @@ def run_plugin(path, *args, stdin_data=None):
     return p.stdout, p.stderr, p.returncode
 
 
-def http_get(port, path):
+def http_get(port, path, timeout=10):
     """GET request, return (status, body_str)."""
     try:
-        r = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10)
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout)
         return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
@@ -306,15 +306,19 @@ def test_go():
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = go_token  # override .env
     env["ELASTIK_APPROVE_TOKEN"] = go_approve
+    # Use DEVNULL for stdout — if piped, Go blocks when the 65KB buffer
+    # fills during 30s+ adversarial tests (classic pipe deadlock).
     proc = subprocess.Popen(
         [exe], env=env, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     try:
-        if not wait_for_server(go_port):
+        if not wait_for_server(go_port, timeout=20):
             test("Go server starts", False, "timeout waiting for server")
             return
+        # Wait for plugin scanning to complete (devtools has 20 routes)
+        time.sleep(3)
         test("Go server starts", True)
 
         _run_auth_tests(go_port, "go", go_token, go_approve)
@@ -326,6 +330,12 @@ def test_go():
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        # Kill any orphan forkbomb children (they sleep 300s on Windows)
+        if sys.platform == "win32":
+            subprocess.run(
+                'wmic process where "name=\'python.exe\' and commandline like \'%%--child%%\'" call terminate',
+                shell=True, capture_output=True
+            )
         # Clean up adversarial plugins
         for p in _adv_installed:
             if os.path.exists(p):
@@ -365,6 +375,125 @@ def _run_adversarial_tests(port, token):
         test("adversarial: selfreader contains __file__",
              "__file__" in body, f"body len={len(body)}")
 
+    # ── devtools route tests (via Go HTTP) ──
+    # Run BEFORE slow adversarial tests (slowdrip/forkbomb) which
+    # can destabilize the server with orphan processes on Windows.
+    print(f"\n  --- devtools Go HTTP tests ---")
+
+    # /wc-c: upload byte counter
+    big = "x" * 50000
+    st, body = http_post(port, "/wc-c", big, token=token)
+    test("devtools: POST /wc-c -> byte count", st == 200 and body.strip() == "50000",
+         f"status={st} body={body[:40]}")
+
+    # /full: always 507
+    st, body = http_get(port, "/full")
+    test("devtools: GET /full -> 507", st == 507, f"status={st}")
+
+    # /true: always 200
+    st, _ = http_get(port, "/true")
+    test("devtools: GET /true -> 200", st == 200, f"status={st}")
+
+    # /false: always 403
+    st, _ = http_get(port, "/false")
+    test("devtools: GET /false -> 403", st == 403, f"status={st}")
+
+    # /yes: returns 'yes' n times
+    st, body = http_get(port, "/yes?n=3")
+    test("devtools: GET /yes?n=3 -> 3 lines", st == 200 and body.strip() == "yes\nyes\nyes",
+         f"status={st} body={body[:40]}")
+
+    # /health: ok + uptime
+    st, body = http_get(port, "/health")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test("devtools: /health has ok", d.get("ok") is True)
+            test("devtools: /health has uptime", "uptime" in d)
+        except json.JSONDecodeError:
+            test("devtools: /health JSON", False, body[:80])
+    else:
+        test("devtools: GET /health -> 200", False, f"status={st}")
+
+    # /whoami: isolation mirror — must have pid, user, env
+    st, body = http_get(port, "/whoami")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test("devtools: /whoami has pid", "pid" in d)
+            test("devtools: /whoami has user", "user" in d)
+            test("devtools: /whoami has env", "env" in d)
+            test("devtools: /whoami has env_count", "env_count" in d)
+        except json.JSONDecodeError:
+            test("devtools: /whoami JSON", False, body[:80])
+    else:
+        test("devtools: GET /whoami -> 200", False, f"status={st}")
+
+    # /verify: structural integrity
+    st, body = http_get(port, "/verify")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test("devtools: /verify has ok", "ok" in d)
+        except json.JSONDecodeError:
+            test("devtools: /verify JSON", False, body[:80])
+    else:
+        test("devtools: GET /verify -> 200", False, f"status={st}")
+
+    # /config/dump: sanitized config
+    st, body = http_get(port, "/config/dump")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test("devtools: /config/dump has pid", "pid" in d)
+            test("devtools: /config/dump token_set", "token_set" in d)
+        except json.JSONDecodeError:
+            test("devtools: /config/dump JSON", False, body[:80])
+    else:
+        test("devtools: GET /config/dump -> 200", False, f"status={st}")
+
+    # /uuid: returns valid UUID
+    st, body = http_get(port, "/uuid")
+    test("devtools: GET /uuid -> 200", st == 200, f"status={st}")
+    if st == 200:
+        import re
+        test("devtools: /uuid is valid UUID",
+             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+                           body.strip())),
+             f"got: {body[:50]}")
+
+    # /cowsay: ASCII art
+    st, body = http_get(port, "/cowsay?say=test")
+    test("devtools: GET /cowsay -> 200", st == 200, f"status={st}")
+    if st == 200:
+        test("devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
+
+    # ── Slow adversarial tests (30s+ each) ──
+    # These go LAST because forceful process kills can destabilize Go on Windows.
+    print(f"\n  --- slow adversarial tests (30s+ each) ---")
+
+    # Slow drip: exceeds 30s timeout → Go returns 504
+    print("    (slowdrip: waiting for 30s timeout...)")
+    st, body = http_get(port, "/slowdrip", timeout=45)
+    test("adversarial: slowdrip -> 504 (timeout)", st == 504,
+         f"status={st} body={body[:80]}")
+
+    # Server still alive after timeout kill
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after slowdrip", st == 200,
+         f"status={st}")
+
+    # Fork bomb: spawns children, parent sleeps forever → Go kills parent
+    print("    (forkbomb: waiting for 30s timeout...)")
+    st, body = http_get(port, "/forkbomb", timeout=45)
+    test("adversarial: forkbomb -> killed (502/504)", st in (502, 504),
+         f"status={st} body={body[:80]}")
+
+    # Server still alive after fork bomb
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after forkbomb", st == 200,
+         f"status={st}")
+
 
 # ── Layer 3: Python HTTP Integration ────────────────────────────────
 
@@ -390,7 +519,7 @@ def test_python():
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
     proc = subprocess.Popen(
         [sys.executable, "boot.py"], env=env, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     try:
@@ -567,12 +696,12 @@ def test_parity():
 
     go_proc = subprocess.Popen(
         [exe], env=env_go, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     py_proc = subprocess.Popen(
         [sys.executable, "boot.py"], env=env_py, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
 

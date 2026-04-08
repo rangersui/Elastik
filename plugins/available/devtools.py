@@ -89,6 +89,20 @@ async def handle_wc(method, body, params):
             "bytes": len(stage.encode()), "_status": 200}
 
 
+async def handle_wc_c(method, body, params):
+    """wc -c — byte count of POST body. Upload stress test receipt.
+
+    Send 5MB up, get 7 bytes back. Perfect one-way bandwidth test.
+    """
+    text = body if isinstance(body, str) else body.decode("utf-8", "replace")
+    return {"_html": str(len(text.encode("utf-8"))), "_status": 200}
+
+
+async def handle_full(method, body, params):
+    """/dev/full — always 507 Insufficient Storage. The bouncer."""
+    return {"error": "no space left on device", "_status": 507}
+
+
 async def handle_null(method, body, params):
     """/dev/null — swallow anything, return 200."""
     return {"_status": 204, "_html": ""}
@@ -277,6 +291,8 @@ ROUTES = {
     "/true": handle_true,
     "/false": handle_false,
     "/yes": handle_yes,
+    "/wc-c": handle_wc_c,
+    "/full": handle_full,
 }
 
 
@@ -447,6 +463,13 @@ def _cgi_dispatch(d):
         n = min(int(params.get("n", "1")), 10000)
         return {"status": 200, "body": "\n".join(["yes"] * n),
                 "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/wc-c":
+        return {"status": 200, "body": str(len(body.encode("utf-8"))),
+                "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/full":
+        return {"status": 507, "body": json.dumps({"error": "no space left on device"})}
 
     return {"status": 404, "body": json.dumps({"error": "not found"})}
 
