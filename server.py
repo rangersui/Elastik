@@ -91,11 +91,12 @@ async def recv(receive):
         if not m.get("more_body"): return b
 
 async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
-    h = [[b"content-type", ct.encode()]]
+    body = data.encode() if isinstance(data, str) else data
+    h = [[b"content-type", ct.encode()], [b"content-length", str(len(body)).encode()]]
     if csp: h.append([b"content-security-policy", _csp().encode()])
     if extra_headers: h.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": h})
-    await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
+    await send({"type": "http.response.body", "body": body})
 
 # ── Plugin slots — empty by default. plugins.py fills them. ──────────
 _plugins = {}     # route path → async handler
@@ -125,7 +126,7 @@ async def app(scope, receive, send):
         cookies = result.pop("_cookies", []); html_body = result.pop("_html", None)
         extra_h = [[b"set-cookie", c.encode()] for c in cookies]
         if redirect: extra_h.append([b"location", redirect.encode()]); status = 302
-        if html_body: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
+        if html_body is not None: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
 
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)

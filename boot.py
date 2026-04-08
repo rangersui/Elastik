@@ -81,6 +81,11 @@ if __name__ == "__main__":
     if not _verify_lock():
         sys.exit(1)
 
+    # Export absolute paths so plugins don't guess.
+    # Same contract as Go: $ELASTIK_DATA, $ELASTIK_ROOT.
+    os.environ.setdefault("ELASTIK_DATA", str(ROOT / "data"))
+    os.environ.setdefault("ELASTIK_ROOT", str(ROOT))
+
     # Load plugins and sync content
     plugins.load_plugins()
     plugins.register_plugin_routes()

@@ -45,11 +45,17 @@ var (
 )
 
 // pluginCmd builds an exec.Cmd for a plugin. .py files run via python.
+// Each plugin runs in its own process group so we can kill the entire
+// tree on timeout (prevents orphan children from forkbomb-style plugins).
 func pluginCmd(ctx context.Context, path string, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
 	if strings.HasSuffix(path, ".py") {
-		return exec.CommandContext(ctx, "python", append([]string{"-u", path}, args...)...)
+		cmd = exec.CommandContext(ctx, "python", append([]string{"-u", path}, args...)...)
+	} else {
+		cmd = exec.CommandContext(ctx, path, args...)
 	}
-	return exec.CommandContext(ctx, path, args...)
+	setProcessGroup(cmd)
+	return cmd
 }
 
 // pluginExec runs a plugin with args and returns stdout. Stderr silenced.
@@ -164,12 +170,18 @@ func servePlugin(w http.ResponseWriter, r *http.Request, pluginPath, route strin
 	pw.Close()
 	res := <-ch
 
+	// Kill entire process group on any failure — prevents orphan children
+	// from forkbomb/terminator plugins lingering after parent dies.
+	if waitErr != nil {
+		killProcessGroup(cmd)
+	}
+
 	// Check overflow first — a plugin killed because the pipe broke after
 	// hitting the 5 MB limit looks like a timeout or exit-error, but the
 	// real cause is oversized output.
 	if len(res.data) > maxPluginOut {
 		log.Printf("  plugin %s: output too large (>%d bytes)", filepath.Base(pluginPath), maxPluginOut)
-		writeErr(w, 502, "plugin output too large")
+		writeErr(w, 413, "plugin output too large")
 		return
 	}
 	if waitErr != nil {

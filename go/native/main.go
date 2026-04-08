@@ -125,14 +125,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth — two tiers, mirrors plugins/auth.py:
-	//   Tier 1: admin + config-* worlds → require X-Approve-Token
+	//   Tier 1: admin + config-* + /proxy/postman → require X-Approve-Token
 	//   Tier 2: all other POST/PUT/DELETE → require X-Auth-Token
 	//   GET is always open.
 	if r.Method != http.MethodGet {
 		parts := splitPath(path)
 		isAdmin := strings.HasPrefix(path, "/admin/")
 		isConfig := len(parts) >= 1 && strings.HasPrefix(parts[0], "config-")
-		if isAdmin || isConfig {
+		isPostman := path == "/proxy/postman"
+		if isAdmin || isConfig || isPostman {
 			// Tier 1: approve token required — locked if not set.
 			if s.cfg.approveToken == "" || !hmacEqual(r.Header.Get("X-Approve-Token"), s.cfg.approveToken) {
 				writeErr(w, 403, "unauthorized")
@@ -356,6 +357,16 @@ func main() {
 		log.Printf("  env: loaded %s", path)
 	}
 	cfg := loadConfig()
+
+	// Export absolute data/root paths so CGI plugins don't have to guess.
+	// Plugins read $ELASTIK_DATA instead of counting __file__ parents.
+	if absData, err := filepath.Abs(cfg.dataDir); err == nil {
+		os.Setenv("ELASTIK_DATA", absData)
+	}
+	if absRoot, err := filepath.Abs("."); err == nil {
+		os.Setenv("ELASTIK_ROOT", absRoot)
+	}
+
 	s := &server{
 		cfg:    cfg,
 		db:     newSQLiteDB(cfg.dataDir),

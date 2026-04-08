@@ -17,7 +17,7 @@ import json, os, subprocess, sys, time, urllib.request, urllib.error, signal
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
-EXE_NAME = "elastik-lite.exe" if sys.platform == "win32" else "elastik-lite"
+EXE_NAME = "elastik.exe" if sys.platform == "win32" else "elastik"
 
 PASS = 0
 FAIL = 0
@@ -53,13 +53,13 @@ def run_plugin(path, *args, stdin_data=None):
     return p.stdout, p.stderr, p.returncode
 
 
-def http_get(port, path):
+def http_get(port, path, timeout=10):
     """GET request, return (status, body_str)."""
     try:
-        r = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10)
-        return r.status, r.read().decode()
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout)
+        return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode("utf-8", "replace")
     except Exception as e:
         return 0, str(e)
 
@@ -164,14 +164,14 @@ def test_cgi():
         except Exception as e:
             test(f"{name}: --routes runs", False, str(e))
 
-    # Edge cases on echo
-    echo_path = os.path.join("plugins", "echo.py")
-    if os.path.exists(echo_path):
-        print(f"\n  --- echo edge cases ---")
+    # Edge cases on echo (now part of devtools.py)
+    devtools_path = os.path.join("plugins", "available", "devtools.py")
+    if os.path.exists(devtools_path):
+        print(f"\n  --- echo edge cases (via devtools) ---")
 
         # Empty body
         req = json.dumps({"path": "/echo", "method": "POST", "body": "", "query": ""})
-        out, _, rc = run_plugin(echo_path, stdin_data=req + "\n")
+        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
         if rc == 0:
             resp = json.loads(out.strip())
             test("echo: empty body -> status 200", resp["status"] == 200)
@@ -180,10 +180,49 @@ def test_cgi():
         # Large body
         big = "x" * 10000
         req = json.dumps({"path": "/echo", "method": "POST", "body": big, "query": ""})
-        out, _, rc = run_plugin(echo_path, stdin_data=req + "\n")
+        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
         if rc == 0:
             resp = json.loads(out.strip())
             test("echo: large body -> preserved", len(resp["body"]) == 10000)
+
+    # ── Adversarial CGI tests ──
+    print(f"\n  --- adversarial CGI tests ---")
+
+    # Stateless proof: counter always returns "1"
+    stateless_path = os.path.join("tests", "adversarial", "stateless.py")
+    if os.path.exists(stateless_path):
+        req = json.dumps({"path": "/stateless", "method": "GET", "body": "", "query": ""})
+        for i in range(3):
+            out, _, rc = run_plugin(stateless_path, stdin_data=req + "\n")
+            if rc == 0:
+                resp = json.loads(out.strip())
+                test(f"stateless: call {i+1} always returns '1'",
+                     resp["body"] == "1", f"got: {resp['body']}")
+
+    # Self-reader: can read its own source
+    selfreader_path = os.path.join("tests", "adversarial", "selfreader.py")
+    if os.path.exists(selfreader_path):
+        req = json.dumps({"path": "/selfreader", "method": "GET", "body": "", "query": ""})
+        out, _, rc = run_plugin(selfreader_path, stdin_data=req + "\n")
+        if rc == 0:
+            resp = json.loads(out.strip())
+            test("selfreader: returns own source",
+                 "selfreader" in resp["body"] and "__file__" in resp["body"],
+                 f"body len={len(resp['body'])}")
+
+    # Truncated: process dies mid-output -> non-zero exit
+    truncated_path = os.path.join("tests", "adversarial", "truncated.py")
+    if os.path.exists(truncated_path):
+        req = json.dumps({"path": "/truncated", "method": "GET", "body": "", "query": ""})
+        out, _, rc = run_plugin(truncated_path, stdin_data=req + "\n")
+        test("truncated: non-zero exit code", rc != 0, f"rc={rc}")
+        if out.strip():
+            # Whatever partial output exists should NOT be valid JSON
+            try:
+                json.loads(out.strip())
+                test("truncated: output is NOT valid JSON", False, "parsed successfully!")
+            except json.JSONDecodeError:
+                test("truncated: output is NOT valid JSON", True)
 
     # Edge cases on ai
     ai_path = os.path.join("plugins", "available", "ai.py")
@@ -248,6 +287,18 @@ def test_go():
             skip("Go HTTP tests", "build failed")
             return
 
+    # Install adversarial plugins for Go to discover
+    import shutil
+    adv_dir = os.path.join(ROOT, "tests", "adversarial")
+    _adv_installed = []
+    if os.path.isdir(adv_dir):
+        for f in os.listdir(adv_dir):
+            if f.endswith(".py"):
+                src = os.path.join(adv_dir, f)
+                dst = os.path.join(ROOT, "plugins", f)
+                shutil.copy2(src, dst)
+                _adv_installed.append(dst)
+
     go_token = "test-go-token"
     go_approve = "test-go-approve"
     env = os.environ.copy()
@@ -255,25 +306,126 @@ def test_go():
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = go_token  # override .env
     env["ELASTIK_APPROVE_TOKEN"] = go_approve
+    # Use DEVNULL for stdout — if piped, Go blocks when the 65KB buffer
+    # fills during 30s+ adversarial tests (classic pipe deadlock).
     proc = subprocess.Popen(
         [exe], env=env, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     try:
-        if not wait_for_server(go_port):
+        if not wait_for_server(go_port, timeout=20):
             test("Go server starts", False, "timeout waiting for server")
             return
+        # Wait for plugin scanning to complete (devtools has 20 routes)
+        time.sleep(3)
         test("Go server starts", True)
 
         _run_auth_tests(go_port, "go", go_token, go_approve)
         _run_http_tests(go_port, "go", token=go_token)
+        _run_adversarial_tests(go_port, go_token)
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        # Kill any orphan forkbomb children (they sleep 300s on Windows)
+        if sys.platform == "win32":
+            subprocess.run(
+                'wmic process where "name=\'python.exe\' and commandline like \'%%--child%%\'" call terminate',
+                shell=True, capture_output=True
+            )
+        # Clean up adversarial plugins
+        for p in _adv_installed:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def _run_adversarial_tests(port, token):
+    """Adversarial tests — prove Go daemon survives malicious plugins."""
+    print(f"\n  --- adversarial Go HTTP tests ---")
+
+    # 1. Truncated JSON: plugin dies mid-output → Go returns 502
+    st, body = http_get(port, "/truncated")
+    test("adversarial: truncated JSON -> 502", st == 502,
+         f"status={st} body={body[:80]}")
+
+    # 2. Infinite output: Go kills at 5MB → 502
+    st, body = http_get(port, "/infinite")
+    test("adversarial: infinite output -> 413", st == 413,
+         f"status={st} body={body[:80]}")
+
+    # Server should still be alive after adversarial attacks
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after attacks", st == 200,
+         f"status={st}")
+
+    # 3. Stateless: every call returns "1" (fresh process each time)
+    for i in range(3):
+        st, body = http_get(port, "/stateless")
+        test(f"adversarial: stateless call {i+1} -> '1'",
+             st == 200 and body.strip() == "1",
+             f"status={st} body={body[:40]}")
+
+    # 4. Self-reader: plugin reads its own source
+    st, body = http_get(port, "/selfreader")
+    test("adversarial: selfreader -> 200", st == 200, f"status={st}")
+    if st == 200:
+        test("adversarial: selfreader contains __file__",
+             "__file__" in body, f"body len={len(body)}")
+
+    # 5. Cthulhu: binary garbage on stdout → Go handles gracefully
+    st, body = http_get(port, "/cthulhu")
+    # Go's json.Unmarshal fails on binary → raw text fallback (200)
+    # or process exit error (502). Either is correct.
+    test("adversarial: cthulhu -> no crash (200 or 502)",
+         st in (200, 502), f"status={st}")
+
+    # Server alive after Cthulhu
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after cthulhu", st == 200,
+         f"status={st}")
+
+    # ── devtools route tests ──
+    _run_devtools_tests(port, "go", token=token)
+
+    # ── Slow adversarial tests (30s+ each) ──
+    # These go LAST because forceful process kills can destabilize Go on Windows.
+    print(f"\n  --- slow adversarial tests (30s+ each) ---")
+
+    # Slow drip: exceeds 30s timeout → Go returns 504
+    print("    (slowdrip: waiting for 30s timeout...)")
+    st, body = http_get(port, "/slowdrip", timeout=45)
+    test("adversarial: slowdrip -> 504 (timeout)", st == 504,
+         f"status={st} body={body[:80]}")
+
+    # Server still alive after timeout kill
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after slowdrip", st == 200,
+         f"status={st}")
+
+    # Fork bomb: spawns children, parent sleeps forever → Go kills parent
+    print("    (forkbomb: waiting for 30s timeout...)")
+    st, body = http_get(port, "/forkbomb", timeout=45)
+    test("adversarial: forkbomb -> killed (502/504)", st in (502, 504),
+         f"status={st} body={body[:80]}")
+
+    # Server still alive after fork bomb
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after forkbomb", st == 200,
+         f"status={st}")
+
+    # Terminator: traps SIGTERM, refuses to die → Go must use SIGKILL
+    print("    (terminator: waiting for 30s timeout...)")
+    st, body = http_get(port, "/terminator", timeout=45)
+    test("adversarial: terminator -> killed (502/504)", st in (502, 504),
+         f"status={st} body={body[:80]}")
+
+    # Server alive after terminator
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after terminator", st == 200,
+         f"status={st}")
 
 
 # ── Layer 3: Python HTTP Integration ────────────────────────────────
@@ -281,14 +433,15 @@ def test_go():
 def test_python():
     print("\n=== Layer 3: Python HTTP Integration ===")
 
-    # Ensure ai plugin is installed for testing
+    # Ensure ai + devtools plugins are installed for testing
     import shutil
-    ai_src = os.path.join(ROOT, "plugins", "available", "ai.py")
-    ai_dst = os.path.join(ROOT, "plugins", "ai.py")
-    _installed_ai = False
-    if os.path.exists(ai_src) and not os.path.exists(ai_dst):
-        shutil.copy2(ai_src, ai_dst)
-        _installed_ai = True
+    _installed = []
+    for pname in ["ai.py", "devtools.py"]:
+        src = os.path.join(ROOT, "plugins", "available", pname)
+        dst = os.path.join(ROOT, "plugins", pname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            _installed.append(dst)
 
     py_port = 13007
     py_token = "test-py-token"
@@ -300,7 +453,7 @@ def test_python():
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
     proc = subprocess.Popen(
         [sys.executable, "boot.py"], env=env, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     try:
@@ -311,15 +464,188 @@ def test_python():
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
         _run_http_tests(py_port, "python", token=py_token)
+        _run_devtools_tests(py_port, "python", token=py_token)
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # Clean up test-installed ai plugin
-        if _installed_ai and os.path.exists(ai_dst):
-            os.remove(ai_dst)
+        # Clean up test-installed plugins
+        for p in _installed:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def _run_devtools_tests(port, label, token=""):
+    """Devtools route tests — shared by Go and Python servers."""
+    print(f"\n  --- devtools {label} HTTP tests ---")
+
+    # /wc-c: upload byte counter
+    big = "x" * 50000
+    st, body = http_post(port, "/wc-c", big, token=token)
+    test(f"{label} devtools: POST /wc-c -> byte count",
+         st == 200 and body.strip() == "50000",
+         f"status={st} body={body[:40]}")
+
+    # /full: always 507
+    st, body = http_get(port, "/full")
+    test(f"{label} devtools: GET /full -> 507", st == 507, f"status={st}")
+
+    # /true: always 200
+    st, _ = http_get(port, "/true")
+    test(f"{label} devtools: GET /true -> 200", st == 200, f"status={st}")
+
+    # /false: always 403
+    st, _ = http_get(port, "/false")
+    test(f"{label} devtools: GET /false -> 403", st == 403, f"status={st}")
+
+    # /yes: returns 'yes' n times
+    st, body = http_get(port, "/yes?n=3")
+    test(f"{label} devtools: GET /yes?n=3 -> 3 lines",
+         st == 200 and body.strip() == "yes\nyes\nyes",
+         f"status={st} body={body[:40]}")
+
+    # /health: ok + uptime
+    st, body = http_get(port, "/health")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /health has ok", d.get("ok") is True)
+            test(f"{label} devtools: /health has uptime", "uptime" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /health JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /health -> 200", False, f"status={st}")
+
+    # /whoami: isolation mirror
+    st, body = http_get(port, "/whoami")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /whoami has pid", "pid" in d)
+            test(f"{label} devtools: /whoami has user", "user" in d)
+            test(f"{label} devtools: /whoami has env", "env" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /whoami JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /whoami -> 200", False, f"status={st}")
+
+    # /verify: structural integrity
+    st, body = http_get(port, "/verify")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /verify has ok", "ok" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /verify JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /verify -> 200", False, f"status={st}")
+
+    # /config/dump: sanitized config
+    st, body = http_get(port, "/config/dump")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} devtools: /config/dump has pid", "pid" in d)
+            test(f"{label} devtools: /config/dump token_set", "token_set" in d)
+        except json.JSONDecodeError:
+            test(f"{label} devtools: /config/dump JSON", False, body[:80])
+    else:
+        test(f"{label} devtools: GET /config/dump -> 200", False, f"status={st}")
+
+    # /uuid: returns valid UUID
+    st, body = http_get(port, "/uuid")
+    test(f"{label} devtools: GET /uuid -> 200", st == 200, f"status={st}")
+    if st == 200:
+        import re
+        test(f"{label} devtools: /uuid is valid UUID",
+             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+                           body.strip())),
+             f"got: {body[:50]}")
+
+    # /cowsay: ASCII art
+    st, body = http_get(port, "/cowsay?say=test")
+    test(f"{label} devtools: GET /cowsay -> 200", st == 200, f"status={st}")
+    if st == 200:
+        test(f"{label} devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
+
+    # /time: Unix epoch timestamp
+    st, body = http_get(port, "/time")
+    test(f"{label} devtools: GET /time -> 200", st == 200, f"status={st}")
+    if st == 200:
+        ts = int(body.strip())
+        now = int(time.time())
+        test(f"{label} devtools: /time within 5s of local clock",
+             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
+
+    # /rev: reverse bytes
+    st, body = http_post(port, "/rev", "hello", token=token)
+    test(f"{label} devtools: POST /rev 'hello' -> 'olleh'",
+         st == 200 and body.strip() == "olleh",
+         f"status={st} body={body[:40]}")
+
+    # /rev with emoji
+    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
+    test(f"{label} devtools: POST /rev emoji round-trip",
+         st == 200 and len(body.strip()) > 0,
+         f"status={st} body={body[:40]}")
+
+    # /grep: write a test world, search it, clean up
+    _grep_world = "grep-integration-test"
+    _grep_content = "line one alpha\nline two NEEDLE beta\nline three gamma"
+    # Write test data
+    st, _ = http_post(port, f"/{_grep_world}/write", _grep_content, token=token)
+    if st == 200:
+        # grep default mode: line-level matches (world:lineno:content)
+        st, body = http_get(port, "/grep?q=NEEDLE")
+        test(f"{label} devtools: /grep default -> line match",
+             st == 200 and f"{_grep_world}:2:" in body and "NEEDLE" in body,
+             f"status={st} body={body[:100]}")
+
+        # grep -l mode: filenames only
+        st, body = http_get(port, "/grep?q=NEEDLE&mode=l")
+        test(f"{label} devtools: /grep?mode=l -> filename list",
+             st == 200 and _grep_world in body,
+             f"status={st} body={body[:100]}")
+
+        # grep no match
+        st, body = http_get(port, "/grep?q=ZZZZNOTFOUND")
+        test(f"{label} devtools: /grep no match -> empty",
+             st == 200 and body.strip() == "",
+             f"status={st} body={body[:60]}")
+
+        # grep missing ?q=
+        st, body = http_get(port, "/grep")
+        test(f"{label} devtools: /grep no ?q= -> 400",
+             st == 400,
+             f"status={st}")
+
+        # /head: first N lines
+        st, body = http_post(port, f"/head?world={_grep_world}&n=1", "", token=token)
+        test(f"{label} devtools: /head?n=1 -> first line",
+             st == 200 and "alpha" in body and "NEEDLE" not in body,
+             f"status={st} body={body[:80]}")
+
+        # /tail: last N lines
+        st, body = http_post(port, f"/tail?world={_grep_world}&n=1", "", token=token)
+        test(f"{label} devtools: /tail?n=1 -> last line",
+             st == 200 and "gamma" in body and "NEEDLE" not in body,
+             f"status={st} body={body[:80]}")
+
+        # /wc: line/word/byte counts
+        st, body = http_post(port, f"/wc?world={_grep_world}", "", token=token)
+        if st == 200:
+            try:
+                d = json.loads(body)
+                test(f"{label} devtools: /wc -> 3 lines",
+                     d.get("lines") == 3, f"got {d}")
+            except json.JSONDecodeError:
+                test(f"{label} devtools: /wc JSON", False, body[:80])
+        else:
+            test(f"{label} devtools: /wc -> 200", False, f"status={st}")
+    else:
+        test(f"{label} devtools: grep setup (write world)", False, f"write status={st}")
 
 
 def _run_auth_tests(port, label, token, approve):
@@ -369,6 +695,25 @@ def _run_auth_tests(port, label, token, approve):
 
         st, _ = http_post(port, "/plugins/reload", token=token)
         test(f"{label} auth: POST /plugins/reload auth -> 200", st == 200, f"status={st}")
+
+    # ── Tier 1: /proxy/* requires approve token (postman = curl proxy) ──
+
+    # POST /proxy/postman with no token -> 403
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}')
+    test(f"{label} auth: POST /proxy/postman no token -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with auth token only -> 403 (needs approve, not auth)
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', token=token)
+    test(f"{label} auth: POST /proxy/postman auth-only -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with wrong approve -> 403
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve="wrong")
+    test(f"{label} auth: POST /proxy/postman wrong approve -> 403", st == 403, f"status={st}")
+
+    # POST /proxy/postman with correct approve -> passes auth (not 403)
+    # Go returns 404 (route not registered — Python-only plugin), Python returns 200
+    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve=approve)
+    test(f"{label} auth: POST /proxy/postman approve -> not 403", st != 403, f"status={st}")
 
     # ── Normal world with auth token should work ──
 
@@ -466,23 +811,24 @@ def test_parity():
     env_py["ELASTIK_TOKEN"] = parity_token
     env_py["ELASTIK_APPROVE_TOKEN"] = parity_approve
 
-    # Install ai plugin for Python
+    # Install ai + devtools plugins for Python
     import shutil
-    ai_src = os.path.join(ROOT, "plugins", "available", "ai.py")
-    ai_dst = os.path.join(ROOT, "plugins", "ai.py")
-    _installed_ai = False
-    if os.path.exists(ai_src) and not os.path.exists(ai_dst):
-        shutil.copy2(ai_src, ai_dst)
-        _installed_ai = True
+    _parity_installed = []
+    for pname in ["ai.py", "devtools.py"]:
+        src = os.path.join(ROOT, "plugins", "available", pname)
+        dst = os.path.join(ROOT, "plugins", pname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            _parity_installed.append(dst)
 
     go_proc = subprocess.Popen(
         [exe], env=env_go, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     py_proc = subprocess.Popen(
         [sys.executable, "boot.py"], env=env_py, cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
 
@@ -560,6 +906,76 @@ def test_parity():
         go_st, _ = http_post(go_port, "/plugins/reload", token=parity_token)
         test("parity: go reload auth -> 200", go_st == 200, f"go={go_st}")
 
+        # ── Devtools parity ──
+        # Both runtimes should serve the same devtools routes with same behavior
+
+        # /health
+        go_st, go_body = http_get(go_port, "/health")
+        py_st, py_body = http_get(py_port, "/health")
+        test("parity: /health same status", go_st == py_st, f"go={go_st} py={py_st}")
+
+        # /true
+        go_st, _ = http_get(go_port, "/true")
+        py_st, _ = http_get(py_port, "/true")
+        test("parity: /true same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+
+        # /false
+        go_st, _ = http_get(go_port, "/false")
+        py_st, _ = http_get(py_port, "/false")
+        test("parity: /false same status", go_st == py_st == 403, f"go={go_st} py={py_st}")
+
+        # /full
+        go_st, _ = http_get(go_port, "/full")
+        py_st, _ = http_get(py_port, "/full")
+        test("parity: /full same status", go_st == py_st == 507, f"go={go_st} py={py_st}")
+
+        # /rev
+        go_st, go_body = http_post(go_port, "/rev", "hello", token=parity_token)
+        py_st, py_body = http_post(py_port, "/rev", "hello", token=parity_token)
+        test("parity: /rev same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        test("parity: /rev same body",
+             go_body.strip() == py_body.strip() == "olleh",
+             f"go={go_body[:20]} py={py_body[:20]}")
+
+        # /wc-c
+        go_st, go_body = http_post(go_port, "/wc-c", "test123", token=parity_token)
+        py_st, py_body = http_post(py_port, "/wc-c", "test123", token=parity_token)
+        test("parity: /wc-c same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        test("parity: /wc-c same count",
+             go_body.strip() == py_body.strip() == "7",
+             f"go={go_body[:10]} py={py_body[:10]}")
+
+        # /time — both should return timestamps within 5s of each other
+        go_st, go_body = http_get(go_port, "/time")
+        py_st, py_body = http_get(py_port, "/time")
+        test("parity: /time same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
+        if go_st == 200 and py_st == 200:
+            test("parity: /time within 5s",
+                 abs(int(go_body.strip()) - int(py_body.strip())) < 5,
+                 f"go={go_body.strip()} py={py_body.strip()}")
+
+        # /grep — write a world on both, grep on both, compare
+        _pw = "parity-grep-test"
+        _pc = "parity line one\nparity NEEDLE two\nparity line three"
+        go_ws, _ = http_post(go_port, f"/{_pw}/write", _pc, token=parity_token)
+        py_ws, _ = http_post(py_port, f"/{_pw}/write", _pc, token=parity_token)
+        if go_ws == 200 and py_ws == 200:
+            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE")
+            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE")
+            test("parity: /grep same status", go_st == py_st == 200,
+                 f"go={go_st} py={py_st}")
+            test("parity: /grep both find NEEDLE",
+                 "NEEDLE" in go_body and "NEEDLE" in py_body,
+                 f"go={go_body[:60]} py={py_body[:60]}")
+            # mode=l
+            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE&mode=l")
+            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE&mode=l")
+            test("parity: /grep?mode=l same status", go_st == py_st == 200,
+                 f"go={go_st} py={py_st}")
+            test("parity: /grep?mode=l both list world",
+                 _pw in go_body and _pw in py_body,
+                 f"go={go_body[:60]} py={py_body[:60]}")
+
     finally:
         go_proc.terminate()
         py_proc.terminate()
@@ -568,8 +984,9 @@ def test_parity():
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
-        if _installed_ai and os.path.exists(ai_dst):
-            os.remove(ai_dst)
+        for p in _parity_installed:
+            if os.path.exists(p):
+                os.remove(p)
 
 
 # ── Main ────────────────────────────────────────────────────────────

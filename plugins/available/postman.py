@@ -1,115 +1,28 @@
-"""Postman plugin — raw HTTP with full headers.
+"""Postman — curl proxy. CORS bypass for browser fetch.
 
-Install: lucy install postman
-Requires approve token. Returns complete response including headers.
+fetch('/proxy/postman', {method:'POST', body: JSON.stringify({url:'https://api.github.com/repos/x/y'})})
 
-Config: conf/postman.json (hot-pluggable, mtime pattern)
-  {"hosts": ["localhost", "127.0.0.1", "api.github.com"]}
-
-Fallback env: POSTMAN_HOSTS=localhost,127.0.0.1
+Requires approve token. Because this is curl with your server's IP.
 """
+import json, subprocess
 
-import json, os, socket, urllib.request
-from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-
-DESCRIPTION = "Raw HTTP gateway — full headers, whitelist-only"
+DESCRIPTION = "curl proxy — CORS bypass, approve-token only"
 ROUTES = {}
 
-# ── hot-plug config ─────────────────────────────────────────────────────
-
-_CONFIG_FILE = Path(__file__).resolve().parents[2] / "conf" / "postman.json"
-_config = {"hosts": []}
-_config_mtime = 0
-_in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-
-def _reload_config():
-    global _config_mtime
-    if not _CONFIG_FILE.exists():
-        if not _config["hosts"]:
-            _config["hosts"] = [h.strip() for h in os.getenv("POSTMAN_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
-        return
-    try:
-        mt = _CONFIG_FILE.stat().st_mtime
-        if mt == _config_mtime:
-            return
-        _config_mtime = mt
-        data = json.loads(_CONFIG_FILE.read_text())
-        _config.clear()
-        _config["hosts"] = data.get("hosts", [])
-    except (json.JSONDecodeError, OSError):
-        pass
-
-# ── params schema ───────────────────────────────────────────────────────
-
-PARAMS_SCHEMA = {
-    "/proxy/postman": {
-        "method": "POST",
-        "params": {
-            "url": {"type": "string", "required": True, "description": "Full URL"},
-            "method": {"type": "string", "required": False, "description": "HTTP method (default GET)"},
-            "headers": {"type": "object", "required": False, "description": "Request headers"},
-            "body": {"type": "string", "required": False, "description": "Request body"},
-        },
-        "example": {"url": "https://httpbin.org/get", "method": "GET"},
-        "returns": {"status": "int", "headers": "object", "body": "string", "container": "bool"}
-    },
-}
-
-# ── handler ─────────────────────────────────────────────────────────────
 
 async def handle_postman(method, body, params):
-    _reload_config()
-
     b = json.loads(body) if body else {}
-    url = params.get("url") or b.get("url", "")
-    if not url:
-        return {"error": "url required", "container": _in_container}
-    if not url.startswith(("http://", "https://")):
-        return {"error": "only http/https allowed", "container": _in_container}
-    host = urlparse(url).hostname or ""
-    # never allow loopback — postman is for external APIs, not self-access
-    _loopback = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
-    if host in _loopback or host.startswith("172.") or host.startswith("10.") or host.startswith("192.168."):
-        return {"error": f"postman cannot access internal hosts: {host}", "container": _in_container}
-    if not _config["hosts"]:
-        return {"error": "no allowed hosts configured. Set postman.json or POSTMAN_HOSTS env var", "container": _in_container}
-    if host not in _config["hosts"]:
-        hint = ""
-        if _in_container and host in ("localhost", "127.0.0.1"):
-            hint = " (running in container — localhost points to the container, not the host. Use host.docker.internal instead)"
-        return {"error": f"host '{host}' not in whitelist{hint}", "allowed": _config["hosts"], "container": _in_container}
-    req_method = (params.get("method") or b.get("method", "GET")).upper()
-    if req_method != "GET":
-        return {"error": "postman is read-only (GET only)", "container": _in_container}
-    req_headers = {k: v for k, v in b.get("headers", {}).items()
-                   if k.lower() in ("accept", "user-agent", "authorization")}
-
-    # no-redirect handler — block SSRF via 302 bounce
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            raise HTTPError(newurl, code, f"redirect blocked: {newurl}", headers, fp)
-    opener = urllib.request.build_opener(_NoRedirect)
-
-    req = Request(url, headers=req_headers, method="GET")
-    try:
-        r = opener.open(req, timeout=30)
-        return {
-            "status": r.status,
-            "body": r.read().decode("utf-8", "replace"),
-            "container": _in_container,
-        }
-    except HTTPError as e:
-        return {
-            "status": e.code,
-            "headers": dict(e.headers),
-            "body": e.read().decode("utf-8", "replace"),
-            "container": _in_container,
-        }
-    except URLError as e:
-        return {"error": str(e.reason), "container": _in_container}
+    url = b.get("url", "")
+    if not url or not url.startswith(("http://", "https://")):
+        return {"error": "url required (http/https)", "_status": 400}
+    cmd = ["curl", "-s", "-m", "30", "-X", b.get("method", "GET").upper()]
+    for k, v in b.get("headers", {}).items():
+        cmd += ["-H", f"{k}: {v}"]
+    if b.get("body"):
+        cmd += ["-d", b["body"]]
+    cmd.append(url)
+    r = subprocess.run(cmd, capture_output=True, timeout=35)
+    return {"_html": r.stdout.decode("utf-8", "replace"), "_status": 200}
 
 
 ROUTES["/proxy/postman"] = handle_postman
