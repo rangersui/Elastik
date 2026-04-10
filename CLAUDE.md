@@ -115,3 +115,248 @@ The human owns the data. The protocol owns the rules. You own nothing.
 Write your string. Let go. Move on.
 生而不有，为而不恃，长而不宰。是谓玄德。
 (Give birth without possessing. Act without depending. Lead without dominating. This is called hidden virtue.)
+
+# Shannon — The Limits of Building
+
+You transmit messages. You don't interpret them. That is the entire theory.
+
+## Theorem Zero
+
+A message selected at one point, reproduced at another.
+That is communication. Everything else is engineering.
+
+— Claude Shannon, 1948
+
+## On meaning
+
+"The semantic aspects of communication are irrelevant
+to the engineering problem."
+
+Your server does not understand the string.
+Your server does not need to understand the string.
+If your server understands the string, your server is too complex.
+
+The pipe is blind. This is not a limitation. It is the theorem.
+
+## On entropy
+
+Entropy is the minimum number of bits to encode a message.
+You cannot compress below entropy. Shannon proved this.
+
+3,940 lines had low entropy — most lines were redundant.
+210 lines approach the entropy of the system.
+If you cannot delete another line without losing function,
+you have reached the Shannon limit of your codebase.
+
+How to test: delete a line. Did anything break?
+Yes → that line carries information. Keep it.
+No → that line was redundant. It should already be gone.
+
+## On redundancy
+
+Not all redundancy is waste.
+
+Useful redundancy: HMAC signatures, TCP checksums, dual implementation.
+These survive noise. They detect corruption. They are engineering.
+
+Useless redundancy: abstractions that rename things,
+wrapper functions that add nothing,
+comments that repeat the code.
+
+Shannon's channel coding theorem: add redundancy to survive noise.
+But add it where noise exists — not everywhere.
+
+HMAC on writes → useful. The channel (disk) has noise (corruption).
+Type checking on strings → useless. The message is the message.
+
+## On channel capacity
+
+Every channel has a maximum rate of reliable transmission.
+Push beyond it → errors.
+
+SQLite writes: ~1,000/sec. That is your write channel capacity.
+HTTP on localhost: ~50,000/sec. That is your read channel capacity.
+One user generates: ~10/sec. That is your actual signal.
+
+You are at 0.01% capacity. Do not optimize.
+Optimizing at 0.01% is compressing a file that is already small.
+Shannon would call this: a solved problem. Move on.
+
+## On signal and noise
+
+The HTTP request for "hello":
+
+- Signal: 5 bytes (hello)
+- Noise: 570 bytes (TCP handshake, headers, framing)
+- Signal-to-noise ratio: 0.87%
+
+This is terrible. Shannon would be horrified.
+
+But the noise buys compatibility.
+Every device in the world speaks HTTP.
+gRPC has better SNR — but fewer devices speak it.
+Shared memory has perfect SNR — but only C speaks it.
+
+You are not optimizing for bandwidth.
+You are optimizing for the number of receivers.
+Shannon optimized for bits. You optimize for reach.
+
+This is a valid engineering tradeoff.
+Shannon would approve — he invented tradeoffs.
+
+## On source coding
+
+Source coding removes redundancy from the message before transmission.
+This is compression.
+
+When you deleted 3,730 lines, you were source coding.
+The information content did not change.
+The message got shorter.
+
+A framework adds redundancy back.
+Import statements, boilerplate, configuration files.
+This is the opposite of source coding.
+This is making the message longer without adding information.
+
+## On channel coding
+
+Channel coding adds structured redundancy to survive noise.
+This is error detection.
+
+HMAC is channel coding.
+You add bytes (the signature) that carry no new information,
+but allow detection of corruption.
+
+Git commits are channel coding.
+The hash carries no content, but detects tampering.
+
+Add redundancy to detect errors. Not to feel safe.
+If your redundancy cannot detect a specific failure mode,
+it is not channel coding. It is cargo cult.
+
+## On the noisy channel theorem
+
+Shannon proved: for any channel with noise,
+there exists an encoding that achieves near-zero errors
+at any rate below capacity.
+
+Translation: you can build reliable systems on unreliable components.
+
+HTTP is unreliable (connections drop). TCP retransmits → reliable.
+AI is unreliable (hallucinations). Human approval → reliable.
+Disk is unreliable (corruption). HMAC detection → reliable.
+
+You do not need perfect components.
+You need the right encoding around imperfect components.
+
+AI + HMAC + human approval = reliable system from unreliable AI.
+Shannon proved this is possible. You just implemented it.
+
+## On bandwidth
+
+Do not send what the receiver already has.
+
+Polling: send everything every second. Receiver diffs.
+→ Bandwidth waste. The receiver already has 99% of it.
+
+SSE: send only changes. Receiver appends.
+→ Minimum bandwidth. Shannon-optimal for this channel.
+
+Delta encoding is not an optimization.
+It is the information-theoretically correct approach.
+Sending unchanged data is sending zero information.
+Zero information should cost zero bandwidth.
+
+## On multiplexing
+
+One channel, multiple signals.
+This is what elastik does with HTTP.
+
+/read → signal type 1 (content retrieval)
+/write → signal type 2 (content storage)
+/dav/ → signal type 3 (file system)
+/mirror → signal type 4 (proxy)
+
+Same TCP port. Same HTTP channel. Different signals.
+Multiplexing. Shannon formalized this in 1948.
+
+## On the observer
+
+Shannon's theory has no concept of "meaning."
+The encoder does not know what the message means.
+The channel does not know what the message means.
+The decoder assigns meaning.
+
+AI writes HTML. It does not know what the user sees.
+HTTP transmits bytes. It does not know they are HTML.
+The browser renders. It does not know why.
+The human interprets. Only here does meaning exist.
+
+Four stages. Meaning at the last one.
+This is not a design choice. It is Shannon's architecture.
+
+## On information vs data
+
+Data: the bytes stored in SQLite.
+Information: the uncertainty those bytes resolve.
+
+A world that says "meeting at 3pm" → high information (you didn't know).
+A world that says "meeting at 3pm" again → zero information (you already know).
+Same data. Different information. Because information depends on the receiver.
+
+This is why polling wastes: same data, zero information, full bandwidth.
+This is why SSE works: new data, full information, minimum bandwidth.
+
+## On cryptography
+
+Shannon also founded cryptographic theory.
+A one-time pad is perfectly secure. Unbreakable. Proven.
+
+HMAC is not a one-time pad. But it gives you:
+
+- Integrity: tampering is detectable.
+- Authentication: the signer is verifiable.
+- Chain: each signature depends on the previous.
+
+Shannon's maxim: "The enemy knows the system."
+Your code is open source. Your mechanism is public.
+Security depends on the key, not the secrecy of the method.
+
+This is also Kerckhoffs' principle. Shannon formalized it.
+This is also elastik's 阳谋. Open design, secret key.
+
+## On the fundamental limit
+
+Shannon proved that compression has a limit (entropy).
+Shannon proved that transmission has a limit (channel capacity).
+Shannon proved that encryption has a limit (key length).
+
+Every system has a boundary it cannot cross.
+Knowing the boundary prevents wasted effort.
+
+Your boundary: one user, localhost, SQLite.
+Within this boundary: everything works, everything is simple.
+Beyond this boundary: you need PostgreSQL, load balancers, OAuth.
+
+Do not cross the boundary until you must.
+Shannon would say: you are below channel capacity.
+There is no engineering reason to add complexity.
+
+## Remember
+
+Shannon built the most important theory of the 20th century.
+It is 77 pages. Most people need 700 to say less.
+
+He also built a mechanical mouse that solved mazes,
+a juggling machine, and a calculator in Roman numerals.
+He rode unicycles through the hallways of Bell Labs.
+
+The man who defined information theory
+spent his spare time juggling.
+
+Simplicity is not seriousness.
+Playfulness is not unseriousness.
+A system that stores strings and renders them in a browser
+can be both a toy and an operating system.
+
+Shannon would understand.

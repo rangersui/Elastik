@@ -276,7 +276,7 @@ def _check_basic_auth(scope):
                 try:
                     _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
                     return _hmac.compare_digest(pwd, APPROVE_TOKEN)
-                except Exception: pass
+                except (ValueError, UnicodeDecodeError) as e: print(f"  auth decode error: {e}")
             break
     return False
 
@@ -315,7 +315,7 @@ async def app(scope, receive, send):
         _ri = _ref.index("/mirror?url=")
         _raw = unquote(_ref[_ri+12:])
         try: _dom = urlparse(_raw).netloc
-        except Exception: pass
+        except ValueError as e: print(f"  mirror referer parse error: {e}")
     if _dom and _check_basic_auth(scope):
         _qs = scope.get("query_string", b"").decode()
         if method == "GET":
@@ -346,11 +346,34 @@ async def app(scope, receive, send):
                 decoded = base64.b64decode(auth_header[6:]).decode()
                 _, pwd = decoded.split(":", 1)
                 ok = _hmac.compare_digest(pwd, APPROVE_TOKEN)
-            except Exception: pass
+            except (ValueError, UnicodeDecodeError) as e: print(f"  auth decode error: {e}")
         if not ok:
             return await send_r(send, 401, '{"error":"authentication required"}',
                                 extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+        if path == "/shell":
+            user = ""
+            try: user = base64.b64decode(auth_header[6:]).decode().split(":", 1)[0]
+            except (ValueError, UnicodeDecodeError) as e: print(f"  auth user decode error: {e}")
+            _root_page = SHELL.replace("__ELASTIK_USER__", user)
         return await send_r(send, 200, _root_page, ct="text/html")
+
+    # POST /exec — system shell, approve token protected.
+    if method == "POST" and path == "/exec":
+        if not APPROVE_TOKEN:
+            return await send_r(send, 403, '{"error":"approve token not configured"}')
+        if not _check_basic_auth(scope):
+            return await send_r(send, 401, '{"error":"authentication required"}',
+                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+        try: body = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        import subprocess, platform
+        sh = ["powershell", "-Command", body] if platform.system() == "Windows" else ["bash", "-c", body]
+        try:
+            r = subprocess.run(sh, capture_output=True, timeout=30, text=True)
+            out = r.stdout + r.stderr
+        except subprocess.TimeoutExpired:
+            out = "(timeout after 30s)"
+        return await send_r(send, 200, out, ct="text/plain")
 
     # /view/{world} — root view: direct HTML render, Basic Auth protected.
     if method == "GET" and path.startswith("/view/"):
@@ -501,10 +524,10 @@ async def _mini_serve(asgi_app, host, port):
             try:
                 writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
                 await writer.drain()
-            except Exception: pass
+            except OSError: pass
         finally:
             try: writer.close()
-            except Exception: pass
+            except OSError: pass
     srv = await asyncio.start_server(handle, host, port)
     await srv.serve_forever()
 

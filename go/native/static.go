@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // staticFiles holds the three files server.py serves from disk at
@@ -127,14 +128,15 @@ func (s *server) serveMirror(w http.ResponseWriter) {
 	_, _ = w.Write(s.static.mirror)
 }
 
-func (s *server) serveShell(w http.ResponseWriter) {
+func (s *server) serveShellWithUser(w http.ResponseWriter, user string) {
 	if s.static.shell == nil {
 		writeErr(w, 404, "shell.html not found")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
-	_, _ = w.Write(s.static.shell)
+	out := strings.ReplaceAll(string(s.static.shell), "__ELASTIK_USER__", user)
+	_, _ = w.Write([]byte(out))
 }
 
 func (s *server) serveManifest(w http.ResponseWriter) {

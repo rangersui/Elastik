@@ -18,10 +18,10 @@ body{background:#1a1a2e;color:#e0e0e0;font-family:'Cascadia Code','Fira Code','S
 .warn{color:#ffd93d}
 </style></head><body>
 <div id="output"></div>
-<div id="bottom"><div id="tab-bar"></div><div id="input-line"><span id="prompt">elastik:~$</span><input id="cmd" autofocus spellcheck="false" autocapitalize="none" autocomplete="off" autocorrect="off"></div></div>
+<div id="bottom"><div id="tab-bar"></div><div id="input-line"><span id="prompt"></span><input id="cmd" autofocus spellcheck="false" autocapitalize="none" autocomplete="off" autocorrect="off"></div></div>
 <script>
 const out=document.getElementById('output'),cmd=document.getElementById('cmd'),promptEl=document.getElementById('prompt');
-let _cwd='',_history=[],_hi=-1,_worlds=[],_pending=null;
+let _cwd='',_history=[],_hi=-1,_worlds=[],_pending=null,_user='__ELASTIK_USER__';
 
 // fetch world list for tab completion
 fetch('/stages').then(r=>r.json()).then(d=>{_worlds=d.map(s=>s.name)}).catch(()=>{});
@@ -35,11 +35,11 @@ const el={
   grep:(q,w)=>fetch('/grep?q='+encodeURIComponent(q)+(w?'&world='+w:'')).then(r=>r.text()),
   post:(url,body,headers)=>fetch('/proxy/postman',{method:'POST',body:JSON.stringify({url,method:'POST',body,headers:headers||{}})}).then(r=>r.text()),
   get:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
-  curl:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
+  exec:(cmd)=>fetch('/exec',{method:'POST',body:cmd}).then(r=>r.text()),
 };
 
 function updatePrompt(){
-  promptEl.textContent='elastik:'+(_cwd||'~')+'$';
+  promptEl.textContent=(_user?_user+'@':'')+'elastik:'+(_cwd||'~')+'$';
 }
 
 function appendOut(text,cls){
@@ -99,7 +99,15 @@ function parseCommand(input){
   if(!parts.length)return undefined;
   const c=parts[0].toLowerCase();
 
-  if(c==='help')return{v:'\n  Files\n    ls                  list worlds\n    cat [world]         render (root, confirm y/n)\n    cat -s [world]      view source (safe)\n    cat --safe [world]  render in sandbox (iframe)\n    open [world]        open in new tab (user)\n    open! [world]       open in new tab (root)\n    cd <world>          set context\n    echo text > world   write\n    echo text >> world  append\n\n  Search\n    grep <q> [world]    search lines\n    head [-n N] [world] first N lines\n    tail [-n N] [world] last N lines\n    wc [world]          count lines/words/bytes\n\n  Network\n    curl <url>          proxy request\n    whoami              node info\n\n  Shell\n    history             past commands\n    clear               clear screen\n    help                this\n\n  Anything else runs as JavaScript.'};
+  // !command → system shell (/exec)
+  if(input.startsWith('!')){
+    const sh=input.slice(1);
+    if(!sh)return{v:'usage: !<command>'};
+    return{p:fetch('/exec',{method:'POST',body:sh}).then(r=>{if(!r.ok)throw new Error('exec: '+r.status);return r.text()}).then(t=>t||'(no output)')};
+  }
+
+  if(c==='help')return{v:'\n  Worlds\n    ls                  list worlds\n    cat [world]         render (root, confirm y/n)\n    cat -s [world]      view source (safe)\n    cat --safe [world]  render in sandbox (iframe)\n    open [world]        open in new tab (user)\n    open! [world]       open in new tab (root)\n    cd <world>          set context\n    pwd                 show current world\n    echo text > world   write\n    echo text >> world  append\n\n  Search\n    grep <q> [world]    search lines\n    head [-n N] [world] first N lines\n    tail [-n N] [world] last N lines\n    wc [world]          count lines/words/bytes\n\n  Network\n    curl <url>          proxy request\n    whoami              node info\n\n  System Shell\n    !<command>          run in bash/powershell\n    !ls /tmp            list real files\n    !pwd                real working directory\n\n  JS API (el object)\n    el.r(world)         read world → Promise\n    el.w(world, html)   write world → Promise\n    el.a(world, html)   append to world → Promise\n    el.stages()         list all worlds → Promise\n    el.exec(cmd)        system shell → Promise\n    el.grep(q, world)   search world → Promise\n    el.get(url)         proxy GET → Promise\n    el.post(url, body)  proxy POST → Promise\n\n  Shell\n    history             past commands\n    clear               clear screen\n    help                this\n\n  Anything else runs as JavaScript.\n  Tab or tap to autocomplete. Type el. to see API methods.'};
+  if(c==='pwd')return{v:_cwd||'~'};
   if(c==='clear')return{v:(out.textContent='',null)};
   if(c==='history')return{v:_history.map((h,i)=>(i+1)+' '+h).join('\n')||'(empty)'};
   if(c==='ls')return{p:fetch('/stages').then(r=>r.json()).then(d=>d.map(s=>s.name+'  (v'+s.version+')').join('\n')||'(no worlds)')};
@@ -199,13 +207,15 @@ function parseCommand(input){
 }
 
 // ── tab completion (shared between keyboard Tab and mobile bar) ─────
-const CMDS=['ls','cd','cat','open','open!','grep','head','tail','wc','echo','curl','whoami','history','clear','help'];
+const CMDS=['ls','cd','cat','open','open!','grep','head','tail','wc','echo','curl','whoami','history','clear','help','pwd'];
+const EL_METHODS=['el.r(','el.w(','el.a(','el.stages()','el.exec(','el.grep(','el.get(','el.post('];
 const tabBar=document.getElementById('tab-bar');
 
 function doComplete(){
   const val=cmd.value;
   const parts=val.split(/\s+/);
   const last=parts[parts.length-1];
+  if(cmd.value.startsWith('el.')){const m=EL_METHODS.filter(x=>x.startsWith(cmd.value));if(m.length===1)cmd.value=m[0];showTabs(m);return}
   const pool=parts.length<=1?CMDS:_worlds;
   if(!last){showTabs(pool);return}
   const matches=pool.filter(x=>x.startsWith(last));
@@ -239,6 +249,7 @@ function hideTabs(){tabBar.innerHTML=''}
 cmd.addEventListener('focus',()=>{if(!cmd.value)showTabs(CMDS)});
 cmd.addEventListener('input',()=>{
   if(!cmd.value){showTabs(CMDS);return}
+  if(cmd.value.startsWith('el.')){const m=EL_METHODS.filter(x=>x.startsWith(cmd.value));showTabs(m);return}
   const parts=cmd.value.split(/\s+/);
   const last=parts[parts.length-1];
   const pool=parts.length<=1?CMDS:_worlds;
@@ -316,6 +327,7 @@ function execInput(){
 
 // keep focus on input
 document.addEventListener('click',e=>{if(!e.target.closest('.tab-btn'))cmd.focus()});
+updatePrompt();
 appendOut('elastik shell — type help for commands, or any JS.\n','info');
 const _q=new URLSearchParams(location.search).get('q');
 if(_q){appendPromptLine(_q);const _p=parseCommand(_q);if(_p!==undefined){if(_p&&_p.p)_p.p.then(r=>{if(r!=null)appendOut(r)}).catch(e=>appendOut('ERROR: '+e.message,'err'));else if(_p&&_p.v!==undefined&&_p.v!==null)appendOut(_p.v)}}

@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"encoding/json"
 	"errors"
@@ -18,8 +19,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -554,10 +557,43 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if path == "/shell" {
-			s.serveShell(w)
+			user, _, _ := r.BasicAuth()
+			s.serveShellWithUser(w, user)
 		} else {
 			s.serveMirror(w)
 		}
+		return
+	}
+
+	// POST /exec — system shell, approve token protected.
+	if r.Method == http.MethodPost && path == "/exec" {
+		if s.cfg.approveToken == "" {
+			writeErr(w, 403, "approve token not configured")
+			return
+		}
+		_, pass, ok := r.BasicAuth()
+		if !ok || !hmacEqual(pass, s.cfg.approveToken) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
+			writeErr(w, 401, "authentication required")
+			return
+		}
+		body, err := readBody(r)
+		if err != nil {
+			writeErr(w, 413, "body too large")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(ctx, "powershell", "-Command", body)
+		} else {
+			cmd = exec.CommandContext(ctx, "bash", "-c", body)
+		}
+		out, _ := cmd.CombinedOutput()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(200)
+		_, _ = w.Write(out)
 		return
 	}
 
