@@ -85,12 +85,28 @@ def load_plugin(name):
         # Remove old routes for this plugin
         old = next((m for m in server._plugin_meta if m["name"] == name), None)
         if old:
-            for r in old["routes"]: server._plugins.pop(r, None)
+            for r in old["routes"]:
+                server._plugins.pop(r, None)
+                server._plugin_auth.pop(r, None)
             server._plugin_meta[:] = [m for m in server._plugin_meta if m["name"] != name]
-        # Register new routes
-        routes = list(ns.get("ROUTES", {}).keys())
-        for path, handler in ns.get("ROUTES", {}).items():
-            server._plugins[path] = handler
+        # Register new routes — two forms:
+        #   v1 spec: ROUTES = ["/path"] + async def handle(...)  (new plugins)
+        #   v0:      ROUTES = {"/path": handler}                 (old plugins, still supported)
+        raw_routes = ns.get("ROUTES", {})
+        auth_level = ns.get("AUTH", "none")
+        routes = []
+        if isinstance(raw_routes, list):
+            h = ns.get("handle")
+            if not h: raise ValueError(f"plugin {name} declares ROUTES as list but has no handle() function")
+            for p in raw_routes:
+                server._plugins[p] = h
+                server._plugin_auth[p] = auth_level
+                routes.append(p)
+        elif isinstance(raw_routes, dict):
+            for p, h in raw_routes.items():
+                server._plugins[p] = h
+                server._plugin_auth[p] = auth_level
+                routes.append(p)
         if "AUTH_MIDDLEWARE" in ns: server._auth = ns["AUTH_MIDDLEWARE"]
         server._plugin_meta.append({"name": name, "description": ns.get("DESCRIPTION", ""),
             "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])})
@@ -116,7 +132,9 @@ def unload_plugin(name):
     """Unload a plugin — remove its routes."""
     meta = next((m for m in server._plugin_meta if m["name"] == name), None)
     if not meta: print(f"  not loaded: {name}"); return
-    for r in meta["routes"]: server._plugins.pop(r, None)
+    for r in meta["routes"]:
+        server._plugins.pop(r, None)
+        server._plugin_auth.pop(r, None)
     if name == "auth" or "auth" in meta.get("description", "").lower(): server._auth = None
     _sync_actions_remove(name, meta["routes"])
     # Auto-clear skills world
