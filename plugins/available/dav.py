@@ -7,7 +7,7 @@ import server
 
 # html → .html.txt so double-click opens in Notepad, not browser.
 # file:// bypasses iframe sandbox, CSP, same-origin — all protections gone.
-_EXT = {"html":".html.txt","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py"}
+_EXT = {"html":".html.txt","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py","c":".c","cpp":".cpp","h":".h","rs":".rs","go":".go","sh":".sh","yaml":".yaml","yml":".yml","toml":".toml","xml":".xml","sql":".sql","ts":".ts","tsx":".tsx","jsx":".jsx","svg":".svg","lua":".lua","rb":".rb","java":".java","kt":".kt","swift":".swift","v":".v"}
 
 def _ext(typ): return _EXT.get(typ or 'plain', '.txt')
 
