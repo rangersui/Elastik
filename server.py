@@ -1,5 +1,5 @@
-"""elastik — the protocol. ~258 lines. Hand-copyable. The survivor's format."""
-import asyncio, base64, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, subprocess, sys, time
+"""elastik — the protocol. Core routes only; everything else is a plugin."""
+import asyncio, base64, hashlib, hmac as _hmac, json, os, re, sqlite3, sys
 from pathlib import Path
 
 DATA = Path("data")
@@ -25,10 +25,6 @@ SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
 _icon_path = Path(__file__).with_name("icon.png")
 ICON = _icon_path.read_bytes() if _icon_path.exists() else None
-_shell_path = Path(__file__).with_name("shell.html")
-SHELL = _shell_path.read_text(encoding="utf-8") if _shell_path.exists() else None
-_mirror_path = Path(__file__).with_name("mirror.html")
-MIRROR = _mirror_path.read_text(encoding="utf-8") if _mirror_path.exists() else None
 def _csp():
     cdn = "https:"
     try:
@@ -43,6 +39,33 @@ def _csp():
             f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
             f"connect-src 'self'; worker-src 'self'")
 _VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+_TYPE_MARKER = re.compile(r'^:::type:(\w+):::\n?')
+
+def _parse_type(body):
+    """Out-of-band type marker. `:::type:xxx:::\\n` at byte 0.
+    Returns (type, stripped_body). No marker → ('plain', body)."""
+    m = _TYPE_MARKER.match(body)
+    if m: return m.group(1), body[m.end():]
+    return 'plain', body
+
+def _infer_type(stage_html):
+    """Heuristic for one-time migration of pre-type-column worlds."""
+    s = (stage_html or '').lstrip()
+    if not s: return 'plain'
+    if s.startswith('<!--use:'): return 'html'
+    if s[0] == '<': return 'html'
+    sl = s[:1024].lower()
+    if '<script' in sl or '<body' in sl or '<html' in sl: return 'html'
+    return 'plain'
+
+def _check_approve_header(scope):
+    """X-Approve-Token header — CSRF-safe (browsers don't auto-attach it)."""
+    if not APPROVE_TOKEN: return False
+    for k, v in scope.get("headers", []):
+        if k == b"x-approve-token":
+            return _hmac.compare_digest(v.decode("utf-8","replace"), APPROVE_TOKEN)
+    return False
+
 _db = {}
 
 def conn(name):
@@ -63,12 +86,22 @@ def conn(name):
         c.executescript("""
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
-                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '');
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
+                type TEXT DEFAULT 'plain');
             INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
                 hmac TEXT NOT NULL, prev_hmac TEXT DEFAULT '');
         """)
+        # One-shot migration for worlds that predate the type column.
+        try:
+            c.execute("ALTER TABLE stage_meta ADD COLUMN type TEXT DEFAULT 'plain'")
+            r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+            if r and r["stage_html"]:
+                c.execute("UPDATE stage_meta SET type=? WHERE id=1", (_infer_type(r["stage_html"]),))
+            c.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         _db[name] = c
     return _db[name]
 
@@ -103,169 +136,6 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": body})
 
-# ── WebDAV ───────────────────────────────────────────────────────────
-def _dav_world_name(path):
-    """Extract world name from /dav/xyz.html → 'xyz'. Strips any extension
-    since world names never contain dots. Returns '' for /dav root."""
-    rest = path[4:].lstrip("/")  # strip /dav
-    if not rest: return ""
-    dot = rest.rfind(".")
-    return rest[:dot] if dot > 0 else rest
-
-_DAV_TYPE_RE = re.compile(r'<!--type:(\w+)-->')
-
-def _dav_file_ext(stage_html):
-    """Return file extension based on <!--type:xxx--> declaration.
-    Worlds using <!--use:renderer--> are always .html."""
-    if stage_html.startswith("<!--use:"): return ".html"
-    m = _DAV_TYPE_RE.search(stage_html)
-    return "." + m.group(1) if m else ".html"
-
-def _dav_prop_entry(href, restype, ct, size, modified):
-    rt = "<D:resourcetype><D:collection/></D:resourcetype>" if restype == "collection" else "<D:resourcetype/>"
-    ct_line = f"<D:getcontenttype>{ct}</D:getcontenttype>" if ct else ""
-    return (f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>"
-            f"{rt}<D:getcontentlength>{size}</D:getcontentlength>"
-            f"<D:getlastmodified>{modified}</D:getlastmodified>"
-            f"{ct_line}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
-
-async def _handle_dav(scope, receive, send, path, method):
-    # Auth: same as normal routes. Read open, write needs auth token.
-    if method in ("PUT", "DELETE") and AUTH_TOKEN:
-        headers = dict(scope.get("headers", []))
-        tok = headers.get(b"x-auth-token", b"").decode()
-        auth_ok = _hmac.compare_digest(tok, AUTH_TOKEN) if tok else False
-        approve_ok = APPROVE_TOKEN and _check_basic_auth(scope)
-        if not auth_ok and not approve_ok:
-            return await send_r(send, 401, '{"error":"unauthorized"}',
-                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-    from email.utils import formatdate
-    now = formatdate(usegmt=True)
-
-    if method == "OPTIONS":
-        h = [[b"dav", b"1"], [b"allow", b"OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND"]]
-        return await send_r(send, 200, "", extra_headers=h)
-
-    if method == "PROPFIND":
-        depth = "1"
-        for k, v in scope.get("headers", []):
-            if k == b"depth": depth = v.decode(); break
-        name = _dav_world_name(path)
-        if name:
-            if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
-                return await send_r(send, 404, '{"error":"not found"}')
-            c = conn(name)
-            r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-            html = r["stage_html"] if r and r["stage_html"] else ""
-            ext = _dav_file_ext(html)
-            xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-                   + _dav_prop_entry(f"/dav/{name}{ext}", "", "text/plain", len(html), now)
-                   + '</D:multistatus>')
-            return await send_r(send, 207, xml, ct="application/xml; charset=utf-8")
-        # Root collection
-        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-               + _dav_prop_entry("/dav/", "collection", "", 0, now))
-        if depth == "1" and DATA.exists():
-            for d in sorted(DATA.iterdir()):
-                if d.is_dir() and (d / "universe.db").exists():
-                    c = conn(d.name)
-                    r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-                    html = r["stage_html"] if r and r["stage_html"] else ""
-                    xml += _dav_prop_entry(f"/dav/{d.name}{_dav_file_ext(html)}", "", "text/plain", len(html), now)
-        xml += '</D:multistatus>'
-        return await send_r(send, 207, xml, ct="application/xml; charset=utf-8")
-
-    if method in ("GET", "HEAD"):
-        name = _dav_world_name(path)
-        if not name:
-            # Browser hitting /dav/ — list worlds as simple HTML
-            html = "<h1>elastik WebDAV</h1><ul>"
-            if DATA.exists():
-                for d in sorted(DATA.iterdir()):
-                    if d.is_dir() and (d / "universe.db").exists():
-                        c = conn(d.name)
-                        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-                        content = r["stage_html"] if r and r["stage_html"] else ""
-                        html += f'<li><a href="/dav/{d.name}{_dav_file_ext(content)}">{d.name}</a></li>'
-            html += "</ul>"
-            return await send_r(send, 200, html, ct="text/html")
-        if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
-            return await send_r(send, 404, '{"error":"not found"}')
-        c = conn(name)
-        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-        html = r["stage_html"] if r and r["stage_html"] else ""
-        return await send_r(send, 200, html, ct="text/plain")
-
-    if method == "PUT":
-        name = _dav_world_name(path)
-        if not name: return await send_r(send, 405, '{"error":"PUT on collection not supported"}')
-        if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
-        try: b = (await recv(receive)).decode("utf-8", "replace")
-        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        c = conn(name)
-        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (b,)); c.commit()
-        log_event(name, "stage_written", {"len": len(b)})
-        return await send_r(send, 201, "")
-
-    if method == "DELETE":
-        name = _dav_world_name(path)
-        if not name: return await send_r(send, 405, '{"error":"DELETE on collection not supported"}')
-        if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
-            return await send_r(send, 404, '{"error":"not found"}')
-        c = conn(name)
-        c.execute("UPDATE stage_meta SET stage_html='',pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
-        return await send_r(send, 204, "")
-
-    if method == "MKCOL":
-        return await send_r(send, 405, '{"error":"worlds are flat — no subdirectories"}')
-    if method in ("LOCK", "UNLOCK"):
-        return await send_r(send, 501, "")
-    return await send_r(send, 405, '{"error":"method not allowed"}')
-
-# ── Mirror reverse proxy ─────────────────────────────────────────────
-def _mirror_proxy(target, domain=""):
-    """curl target, return (body_bytes, content_type). Injects <base> for HTML."""
-    try:
-        r = subprocess.run(["curl", "-s", "-L", "-m", "30", "-D", "-", target],
-                           capture_output=True, timeout=35)
-        raw = r.stdout
-        # curl -D - with -L may produce multiple header blocks; use the last one.
-        sep = raw.rfind(b"\r\n\r\n")
-        if sep == -1: sep = raw.rfind(b"\n\n")
-        if sep == -1: return raw, "text/html"
-        headers_part = raw[:sep].decode("utf-8", "replace").lower()
-        body = raw[sep+4:] if raw[sep:sep+4] == b"\r\n\r\n" else raw[sep+2:]
-        ct = "text/html"
-        for line in headers_part.split("\n"):
-            if line.strip().startswith("content-type:"):
-                ct = line.split(":", 1)[1].strip()
-                break
-        if "text/html" in ct and domain:
-            body = re.sub(rb'(?i)<meta[^>]*(?:content-security-policy|x-frame-options)[^>]*>', b'', body)
-            body = f'<base href="/m/{domain}/">'.encode() + body
-        return body, ct
-    except Exception as e:
-        return json.dumps({"error": str(e)}).encode(), "application/json"
-
-def _mirror_target(path, qs):
-    """Parse mirror URL. Returns (target, domain) or (None, None)."""
-    from urllib.parse import parse_qs, urlparse
-    if path in ("/mirror", "/mirror/"):
-        params = parse_qs(qs)
-        raw = params.get("url", [""])[0]
-        if not raw or not raw.startswith(("http://", "https://")): return None, None
-        return raw, urlparse(raw).netloc
-    if path.startswith("/m/"):
-        rest = path[3:]
-        slash = rest.find("/")
-        if slash == -1: return "https://" + rest, rest
-        dom = rest[:slash]
-        p = rest[slash:]
-        target = "https://" + dom + p
-        if qs: target += "?" + qs
-        return target, dom
-    return None, None
-
 def _check_basic_auth(scope):
     """Check Basic Auth against APPROVE_TOKEN. Returns True if valid."""
     if not APPROVE_TOKEN: return False
@@ -281,134 +151,78 @@ def _check_basic_auth(scope):
     return False
 
 # ── Plugin slots — empty by default. plugins.py fills them. ──────────
-_plugins = {}     # route path → async handler
-_auth = None      # auth middleware (set by auth plugin)
-_plugin_meta = [] # plugin metadata list
+_plugins = {}      # route path → async handler
+_plugin_auth = {}  # route path → "none" | "auth" | "approve"
+_auth = None       # auth middleware (set by auth plugin)
+_plugin_meta = []  # plugin metadata list
+
+def _check_auth_token(scope):
+    """Check X-Auth-Token header against AUTH_TOKEN."""
+    if not AUTH_TOKEN: return True  # no token configured = open
+    for k, v in scope.get("headers", []):
+        if k == b"x-auth-token":
+            return _hmac.compare_digest(v.decode("utf-8","replace"), AUTH_TOKEN)
+    return False
+
+def _match_plugin(base_path):
+    """Exact match first, then prefix match (longest wins).
+    Returns (handler, matched_route) or (None, None)."""
+    h = _plugins.get(base_path)
+    if h: return h, base_path
+    best = None
+    for p in _plugins:
+        if base_path.startswith(p + "/") and (best is None or len(p) > len(best)):
+            best = p
+    return (_plugins[best], best) if best else (None, None)
 
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
     print(f"  {method} {path}")
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
-    # WebDAV: /dav/ namespace — worlds as files.
-    if path == "/dav" or path.startswith("/dav/"):
-        return await _handle_dav(scope, receive, send, path, method)
-    # Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
-    _mt, _md = _mirror_target(path, scope.get("query_string", b"").decode())
-    if _mt:
-        if not _check_basic_auth(scope):
-            return await send_r(send, 401, '{"error":"authentication required"}',
-                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-        body, ct = _mirror_proxy(_mt, _md)
-        return await send_r(send, 200, body, ct=ct)
-    # Mirror Referer fallback — absolute paths from mirrored pages.
-    _ref = ""
-    for k, v in scope.get("headers", []):
-        if k == b"referer": _ref = v.decode(); break
-    _dom = ""
-    if "/m/" in _ref:
-        _ri = _ref.index("/m/")
-        _rest = _ref[_ri+3:]
-        _dom = _rest.split("/")[0].split("?")[0]
-    elif "/mirror?url=" in _ref:
-        from urllib.parse import unquote, urlparse
-        _ri = _ref.index("/mirror?url=")
-        _raw = unquote(_ref[_ri+12:])
-        try: _dom = urlparse(_raw).netloc
-        except ValueError as e: print(f"  mirror referer parse error: {e}")
-    if _dom and _check_basic_auth(scope):
-        _qs = scope.get("query_string", b"").decode()
-        if method == "GET":
-            # 302 redirect to /m/domain/path — pull URL back into namespace.
-            _redir = "/m/" + _dom + path
-            if _qs: _redir += "?" + _qs
-            return await send_r(send, 302, '{"redirect":true}',
-                                extra_headers=[[b"location", _redir.encode()]])
-        else:
-            # POST: proxy directly — redirect would lose body.
-            _target = "https://" + _dom + path
-            if _qs: _target += "?" + _qs
-            body, ct = _mirror_proxy(_target, _dom)
-            return await send_r(send, 200, body, ct=ct)
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
-    # /shell, /mirror — Basic Auth protected root pages.
-    _root_page = (SHELL if path == "/shell" else MIRROR if path == "/mirror" else None)
-    if method == "GET" and path in ("/shell", "/mirror") and _root_page:
-        if not APPROVE_TOKEN:
-            return await send_r(send, 403, '{"error":"approve token not configured"}')
-        auth_header = ""
-        for k, v in scope.get("headers", []):
-            if k == b"authorization": auth_header = v.decode(); break
-        ok = False
-        if auth_header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth_header[6:]).decode()
-                _, pwd = decoded.split(":", 1)
-                ok = _hmac.compare_digest(pwd, APPROVE_TOKEN)
-            except (ValueError, UnicodeDecodeError) as e: print(f"  auth decode error: {e}")
-        if not ok:
-            return await send_r(send, 401, '{"error":"authentication required"}',
-                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-        if path == "/shell":
-            user = ""
-            try: user = base64.b64decode(auth_header[6:]).decode().split(":", 1)[0]
-            except (ValueError, UnicodeDecodeError) as e: print(f"  auth user decode error: {e}")
-            _root_page = SHELL.replace("__ELASTIK_USER__", user)
-        return await send_r(send, 200, _root_page, ct="text/html")
-
-    # POST /exec — system shell, approve token protected.
-    if method == "POST" and path == "/exec":
-        if not APPROVE_TOKEN:
-            return await send_r(send, 403, '{"error":"approve token not configured"}')
-        if not _check_basic_auth(scope):
-            return await send_r(send, 401, '{"error":"authentication required"}',
-                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-        try: body = (await recv(receive)).decode("utf-8", "replace")
-        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        import subprocess, platform
-        sh = ["powershell", "-Command", body] if platform.system() == "Windows" else ["bash", "-c", body]
-        try:
-            r = subprocess.run(sh, capture_output=True, timeout=30, text=True)
-            out = r.stdout + r.stderr
-        except subprocess.TimeoutExpired:
-            out = "(timeout after 30s)"
-        return await send_r(send, 200, out, ct="text/plain")
-
-    # /view/{world} — root view: direct HTML render, Basic Auth protected.
-    if method == "GET" and path.startswith("/view/"):
-        if not APPROVE_TOKEN:
-            return await send_r(send, 403, '{"error":"approve token not configured"}')
-        if not _check_basic_auth(scope):
-            return await send_r(send, 401, '{"error":"authentication required"}',
-                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-        name = path[6:]  # /view/work → work
-        if not _VALID_NAME.match(name):
-            return await send_r(send, 400, '{"error":"invalid world name"}')
-        if not (DATA / name / "universe.db").exists():
-            return await send_r(send, 404, '{"error":"world not found"}')
-        c = conn(name)
-        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-        html = r["stage_html"] if r and r["stage_html"] else "<em>(empty)</em>"
-        return await send_r(send, 200, html, ct="text/html")
 
     if _auth and not await _auth(scope, path, method):
         return await send_r(send, 403, '{"error":"unauthorized"}')
     parts = [p for p in path.split("/") if p]
 
-    # Plugin route dispatch — slot empty = skip
+    # Plugin dispatch — exact or prefix match, server gates auth centrally.
     base_path = path.split("?")[0]
-    if base_path in _plugins:
-        b = await recv(receive)
+    handler, matched = _match_plugin(base_path)
+    if handler:
+        level = _plugin_auth.get(matched, "none")
+        # OPTIONS is capability discovery — always allow so WebDAV/CORS works.
+        if method != "OPTIONS":
+            if level == "approve":
+                if not APPROVE_TOKEN:
+                    return await send_r(send, 403, '{"error":"approve token not configured"}')
+                if not _check_basic_auth(scope):
+                    return await send_r(send, 401, '{"error":"authentication required"}',
+                                        extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+            elif level == "auth":
+                if not _check_auth_token(scope):
+                    return await send_r(send, 403, '{"error":"unauthorized"}')
+        try: b = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         params["_scope"] = scope
-        result = await _plugins[base_path](method, b, params)
-        status = result.pop("_status", 200); redirect = result.pop("_redirect", None)
-        cookies = result.pop("_cookies", []); html_body = result.pop("_html", None)
+        result = await handler(method, b, params)
+        status = result.pop("_status", 200)
+        redirect = result.pop("_redirect", None)
+        cookies = result.pop("_cookies", [])
+        html_body = result.pop("_html", None)
+        raw_body = result.pop("_body", None)
+        ct = result.pop("_ct", "application/json")
+        custom_h = result.pop("_headers", [])
         extra_h = [[b"set-cookie", c.encode()] for c in cookies]
+        if custom_h: extra_h.extend([[str(k).encode(), str(v).encode()] for k, v in custom_h])
         if redirect: extra_h.append([b"location", redirect.encode()]); status = 302
-        if html_body is not None: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
+        if html_body is not None:
+            return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
+        if raw_body is not None:
+            return await send_r(send, status, raw_body, ct=ct, extra_headers=extra_h or None)
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
 
     if method == "GET" and path == "/opensearch.xml":
@@ -445,16 +259,26 @@ async def app(scope, receive, send):
             if not (DATA / name / "universe.db").exists():
                 return await send_r(send, 404, '{"error":"world not found"}')
             c = conn(name)
-            r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
+            r = c.execute("SELECT stage_html,pending_js,js_result,version,type FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
         c = conn(name)
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         b = _extract(b, action)
+        # Type gate: touching an html-typed world (or becoming one) requires approve token.
+        if action in ("write","append","sync"):
+            cur = c.execute("SELECT type FROM stage_meta WHERE id=1").fetchone()
+            cur_type = cur["type"] if cur else 'plain'
+            if action == "write":
+                new_type, b = _parse_type(b)  # strip marker from stored content
+            else:
+                new_type = cur_type  # append/sync preserve type
+            if (cur_type == 'html' or new_type == 'html') and not _check_approve_header(scope):
+                return await send_r(send, 403, '{"error":"html type requires X-Approve-Token"}')
         if action == "write":
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            log_event(name, "stage_written", {"len": len(b)})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
+            c.execute("UPDATE stage_meta SET stage_html=?,type=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_type)); c.commit()
+            log_event(name, "stage_written", {"len": len(b), "type": new_type})
+            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "type": new_type}))
         if action == "append":
             c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_appended", {"len": len(b)})

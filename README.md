@@ -775,6 +775,32 @@ ELASTIK_NODE=my-laptop         # node name (default: hostname)
 ELASTIK_PEERS=10.0.0.5,10.0.0.6  # seed peers for non-multicast environments
 ```
 
+## WebDAV
+
+Worlds as files. Edit with VS Code, Obsidian, or any text editor.
+
+```bash
+# Map as a network drive (Windows)
+net use Z: http://127.0.0.1:3005/dav/ /user:x <ELASTIK_APPROVE_TOKEN>
+# Now Z:\work.txt = the "work" world. Edit, save, done.
+```
+
+Reads are open. Writes need `X-Auth-Token` or Basic Auth (approve
+token). Windows Explorer's "Map Network Drive" UI has a known bug
+with non-standard ports — use `net use` from the command line instead.
+
+To auto-map on login:
+```powershell
+net use Z: http://127.0.0.1:3005/dav/ /user:x <TOKEN> /persistent:yes
+```
+
+Windows requires `BasicAuthLevel=2` in the registry for HTTP WebDAV:
+```powershell
+# Run once as admin
+Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters' -Name 'BasicAuthLevel' -Value 2
+Restart-Service WebClient
+```
+
 ## Backup
 
 Dual-path data protection:

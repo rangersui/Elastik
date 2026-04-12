@@ -22,8 +22,8 @@ def _get_approve_token(scope):
     return ""
 
 async def auth_middleware(scope, path, method):
-    # GET always open
-    if method == "GET": return True
+    # Read + discovery methods always open. Plugin dispatch gates per-route.
+    if method in ("GET", "HEAD", "OPTIONS", "PROPFIND"): return True
     parts = [p for p in path.split("/") if p]
     # Admin + config + postman = approve token required — checked FIRST, before any bypass
     if path.startswith("/admin/") or path.startswith("/proxy") or (len(parts) >= 1 and parts[0].startswith("config-") and method == "POST"):
@@ -39,6 +39,8 @@ async def auth_middleware(scope, path, method):
     if path.startswith("/auth/"): return True
     # Plugin approve has its own token check inside handler
     if path == "/plugins/approve": return True
+    # WebDAV uses Basic Auth, not X-Auth-Token. dav plugin handles auth inline.
+    if path.startswith("/dav"): return True
 
     # Everything else — check X-Auth-Token (approve token also passes — higher privilege)
     token = os.getenv("ELASTIK_TOKEN", "")
