@@ -397,6 +397,11 @@ def _run_http():
     def advance_knock(ip, path):
         if not KNOCK:
             return
+        # Knock is only for direct clients. Proxied scenarios (Claude.ai
+        # via Anthropic egress) must use the bearer token instead -- never
+        # let a shared proxy IP sneak into the whitelist.
+        if ip_in_anthropic(ip):
+            return
         gc_knock()
         now = _time.time()
         idx, ts = _knock.get(ip, (0, 0))
