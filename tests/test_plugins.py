@@ -64,6 +64,27 @@ def http_get(port, path, timeout=10):
         return 0, str(e)
 
 
+def http_method(port, path, method="GET", body=None, token="", basic_auth="", headers=None):
+    """Arbitrary HTTP method with optional X-Auth-Token or Basic Auth."""
+    try:
+        data = body.encode() if isinstance(body, str) else body
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method)
+        if token:
+            req.add_header("X-Auth-Token", token)
+        if basic_auth:
+            import base64
+            req.add_header("Authorization", "Basic " + base64.b64encode(f":{basic_auth}".encode()).decode())
+        if headers:
+            for k, v in headers.items():
+                req.add_header(k, v)
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, str(e)
+
+
 def http_post(port, path, body="", token="", approve="", headers=None):
     """POST request, return (status, body_str)."""
     try:
@@ -463,6 +484,7 @@ def test_python():
         test("Python server starts", True)
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
+        _run_plugin_auth_tests(py_port, "python", py_token, py_approve)
         _run_http_tests(py_port, "python", token=py_token)
         _run_devtools_tests(py_port, "python", token=py_token)
     finally:
@@ -723,6 +745,64 @@ def _run_auth_tests(port, label, token, approve):
     st, body = http_get(port, "/authtest/read")
     test(f"{label} auth: GET normal world read -> data", st == 200 and "hello" in body,
          f"status={st} body={body[:60]}")
+
+
+def _run_plugin_auth_tests(port, label, token, approve):
+    """Auth tests for plugin routes: shell, exec, mirror, view, dav."""
+
+    # ── Shell: GET needs approve (Basic Auth) ──
+    st, _ = http_get(port, "/shell")
+    test(f"{label} plugin-auth: GET /shell no auth -> 401", st == 401, f"status={st}")
+
+    st, _ = http_method(port, "/shell", basic_auth=approve)
+    test(f"{label} plugin-auth: GET /shell approve -> 200", st == 200, f"status={st}")
+
+    # ── Exec: POST needs approve ──
+    st, _ = http_post(port, "/exec", "echo hi")
+    test(f"{label} plugin-auth: POST /exec no auth -> 403", st in (401, 403), f"status={st}")
+
+    st, body = http_method(port, "/exec", method="POST", body="echo hi", basic_auth=approve)
+    test(f"{label} plugin-auth: POST /exec approve -> 200", st == 200 and "hi" in body, f"status={st}")
+
+    # ── Mirror: GET needs approve ──
+    st, _ = http_get(port, "/mirror")
+    test(f"{label} plugin-auth: GET /mirror no auth -> 401", st == 401, f"status={st}")
+
+    st, _ = http_method(port, "/mirror", basic_auth=approve)
+    test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
+
+    # ── View: GET needs approve (+ type gate) ──
+    st, _ = http_get(port, "/view/work")
+    test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
+
+    st, _ = http_method(port, "/view/work", basic_auth=approve)
+    # 200 if html-typed, 415 if plain — either means auth passed
+    test(f"{label} plugin-auth: GET /view approve -> auth passed", st in (200, 415), f"status={st}")
+
+    # ── WebDAV: reads open, writes need auth ──
+    st, _ = http_method(port, "/dav/", method="OPTIONS")
+    test(f"{label} plugin-auth: OPTIONS /dav -> 200", st == 200, f"status={st}")
+
+    st, _ = http_method(port, "/dav/", method="PROPFIND", headers={"Depth": "0"})
+    test(f"{label} plugin-auth: PROPFIND /dav no auth -> 207", st == 207, f"status={st}")
+
+    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="test")
+    test(f"{label} plugin-auth: PUT /dav no auth -> 401", st == 401, f"status={st}")
+
+    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="dav-write", token=token)
+    test(f"{label} plugin-auth: PUT /dav token -> 201", st == 201, f"status={st}")
+
+    st, body = http_get(port, "/dav/auth-test-world")
+    test(f"{label} plugin-auth: GET /dav read back -> ok", st == 200 and "dav-write" in body, f"status={st}")
+
+    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="dav-basic", basic_auth=approve)
+    test(f"{label} plugin-auth: PUT /dav Basic Auth -> 201", st == 201, f"status={st}")
+
+    st, _ = http_method(port, "/dav/auth-test-world", method="DELETE")
+    test(f"{label} plugin-auth: DELETE /dav no auth -> 401", st == 401, f"status={st}")
+
+    st, _ = http_method(port, "/dav/auth-test-world", method="DELETE", basic_auth=approve)
+    test(f"{label} plugin-auth: DELETE /dav approve -> 204", st == 204, f"status={st}")
 
 
 def _run_http_tests(port, label, token=""):
