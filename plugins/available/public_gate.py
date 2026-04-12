@@ -321,6 +321,10 @@ async def auth_gate(scope, receive, send, path, method):
         return None  # Authorized, proceed to server.py
 
     # ── Unauthorized → pastebin disguise ──
+    # OPTIONS is capability discovery — safe to let through (no data leaked).
+    # Needed for WebDAV clients to discover DAV support before auth prompt.
+    if method == "OPTIONS":
+        return None
     is_head = method == "HEAD"
     if method in ("GET", "HEAD"):
         if path in ("/", ""):
@@ -340,11 +344,10 @@ async def auth_gate(scope, receive, send, path, method):
         await _send_plain(send, 200, key + "\n")
         return True
 
-    if method in ("DELETE", "PUT"):
-        await _send_plain(send, 405, "method not allowed\n")
-        return True
-
-    return None  # Unknown method, let server.py handle
+    # Everything else (DELETE, PUT, PROPFIND, MKCOL, LOCK, etc.)
+    # — unauthorized, don't let anything through.
+    await _send_plain(send, 405, "method not allowed\n")
+    return True
 
 
 # ── MCP route ─────────────────────────────────────────────────────
