@@ -1,47 +1,47 @@
 # elastik plugin spec v1
 
-一个 plugin 是一个 .py 文件在 plugins/ 目录下。
+A plugin is a .py file in the plugins/ directory.
 
-## 必须声明
+## Required declarations
 
 ```python
-ROUTES = ["/path"]               # 要注册的路由
-AUTH = "none" | "auth" | "approve"  # 权限级别
+ROUTES = ["/path"]               # routes to register
+AUTH = "none" | "auth" | "approve"  # permission level
 ```
 
-## 必须实现
+## Required implementation
 
 ```python
 async def handle(method, body, params):
     # method: GET/POST/PUT/DELETE/PROPFIND/...
-    # body:   请求体字符串 (已 decode)
+    # body:   request body string (already decoded)
     # params: query string dict + _scope
-    # 返回:
-    #   {...}             → 自动 json.dumps
+    # returns:
+    #   {...}             → auto json.dumps
     #   {"_html": str}    → text/html
-    #   {"_body": str, "_ct": "..."} → 自定义 content-type
-    #   {"_status": int}  → 自定义状态码
+    #   {"_body": str, "_ct": "..."} → custom content-type
+    #   {"_status": int}  → custom status code
     #   {"_redirect": str} → 302
-    #   {"_headers": [[k,v], ...]} → 自定义响应头
+    #   {"_headers": [[k,v], ...]} → custom response headers
     return {"ok": True}
 ```
 
-## server.py 保证
+## server.py guarantees
 
-- AUTH 检查在调 handle 之前完成
-- plugin 不需要 import 任何 auth 函数
-- plugin 不需要检查 token
-- body 大小已限制 (MAX_BODY)
-- 路径已验证 (无 .. 和 //)
+- AUTH check completes before handle is called
+- Plugins do not need to import any auth functions
+- Plugins do not need to check tokens
+- Body size is capped (MAX_BODY)
+- Paths are validated (no .. or //)
 
-## plugin 不能做
+## Plugins cannot
 
-- 不能修改 server.py 的全局状态
-- 不能直接调 send/receive
-- 不能自己检查 auth（重复且会漏）
-- 不能注册 /stages /read /write 等核心路由
+- Modify server.py global state
+- Call send/receive directly
+- Check auth themselves (redundant and error-prone)
+- Register core routes like /stages /read /write
 
-## 核心路由（server.py 永久持有，不可 plugin 化）
+## Core routes (owned by server.py, never pluginized)
 
 ```
 /<world>/read
@@ -55,6 +55,8 @@ async def handle(method, body, params):
 /  → index.html
 ```
 
-## 一切其他路由都是 plugin
+## Everything else is a plugin
 
-权限在内核不在应用。应用自己检查一定会漏。内核统一检查不可能漏。
+Auth lives in the kernel, not the application. Applications checking
+auth themselves will always miss cases. The kernel checking uniformly
+cannot.
