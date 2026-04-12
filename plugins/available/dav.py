@@ -5,7 +5,9 @@ from email.utils import formatdate
 import hmac as _hmac, os
 import server
 
-_EXT = {"html":".html","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py"}
+# html → .html.txt so double-click opens in Notepad, not browser.
+# file:// bypasses iframe sandbox, CSP, same-origin — all protections gone.
+_EXT = {"html":".html.txt","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py"}
 
 def _ext(typ): return _EXT.get(typ or 'plain', '.txt')
 
