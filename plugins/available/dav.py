@@ -34,7 +34,7 @@ def _check_write_auth(scope):
 def _world_name(path):
     rest = path[4:].lstrip("/")  # strip /dav
     if not rest: return ""
-    dot = rest.rfind(".")
+    dot = rest.find(".")  # first dot — world names have no dots
     return rest[:dot] if dot > 0 else rest
 
 def _read(name):
