@@ -355,10 +355,30 @@ async def app(scope, receive, send):
             if isinstance(body, str): body = body.encode("utf-8")
             ext = r["ext"] or "plain"
             ct = _ext_to_ct(ext)
-            await send({"type":"http.response.start","status":200,"headers":[
-                [b"content-type", ct.encode()],
-                [b"content-length", str(len(body)).encode()]]})
-            await send({"type":"http.response.body","body":body})
+            total = len(body)
+            # Range header — lets TVs fast-forward, browsers seek, AirPlay work
+            range_h = ""
+            for k, v in scope.get("headers", []):
+                if k == b"range": range_h = v.decode(); break
+            if range_h.startswith("bytes="):
+                parts = range_h[6:].split("-", 1)
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if len(parts) > 1 and parts[1] else total - 1
+                if start >= total: start = total - 1
+                if end >= total: end = total - 1
+                chunk = body[start:end+1]
+                await send({"type":"http.response.start","status":206,"headers":[
+                    [b"content-type", ct.encode()],
+                    [b"content-range", f"bytes {start}-{end}/{total}".encode()],
+                    [b"content-length", str(len(chunk)).encode()],
+                    [b"accept-ranges", b"bytes"]]})
+                await send({"type":"http.response.body","body":chunk})
+            else:
+                await send({"type":"http.response.start","status":200,"headers":[
+                    [b"content-type", ct.encode()],
+                    [b"content-length", str(total).encode()],
+                    [b"accept-ranges", b"bytes"]]})
+                await send({"type":"http.response.body","body":body})
             return
         c = conn(name)
         # Check ?ext= early — binary exts skip text decode
