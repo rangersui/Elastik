@@ -146,10 +146,68 @@ No signing required (unsigned profiles show a warning but install).
 IT departments use this for device enrollment. You use it to configure
 your own phone from elastik.
 
+**HLS Streaming (.m3u8)**
+`application/vnd.apple.mpegurl`
+
+m3u8 is a text playlist pointing to media URLs. Store playlist in
+a world, point segments at other worlds' `/raw`. Safari, Apple TV,
+VLC, every smart TV plays it natively. No FFmpeg. No transcoding.
+
+```
+#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+/video-seg-001/raw
+#EXTINF:10,
+/video-seg-002/raw
+```
+
+Each segment is a world with ext=ts (MPEG transport stream). The
+playlist is a world with ext=m3u8. iPhone visits `/stream/raw` →
+video plays. Adaptive bitrate: multiple playlists pointing to
+different quality segments. All text files pointing to /raw URLs.
+
+**Enterprise App Install (itms-services:// + .plist)**
+`itms-services://?action=download-manifest&url=https://<host>/manifest/raw`
+
+iOS enterprise app distribution. A .plist XML manifest points to an
+.ipa file URL. When iOS encounters the `itms-services://` URL scheme,
+it downloads the plist, reads the IPA URL, installs the app.
+
+Store manifest.plist in a world (ext=plist, Content-Type: text/xml).
+Store the .ipa in another world (ext=ipa). Link:
+`itms-services://?action=download-manifest&url=https://<tunnel>/manifest/raw`
+
+One URL → app installs on iPhone. Enterprise distribution without
+Apple Business Manager. Your elastik is an app store.
+
+**OPDS Catalog (ebook readers)**
+`application/atom+xml;profile=opds-catalog`
+
+OPDS = RSS for ebooks. Calibre, KOReader, Aldiko, Apple Books (via
+third-party), Moon+ Reader — all support OPDS browsing.
+
+Store ebooks as worlds (ext=epub/pdf). Serve an OPDS Atom feed as a
+plugin route. Ebook readers browse your library, download books from
+`/raw`. Your universe.db is a personal library server.
+
+```
+GET /opds → Atom XML catalog listing ebook worlds
+GET /books/erta-day/raw → application/epub+zip → reader downloads
+```
+
+### Pattern
+
 These aren't protocol surfaces — they're MIME type surfaces. The
 protocol is plain HTTP. The magic is the Content-Type header that
-triggers native iOS behavior. `/raw` already does this. Just needs
-the MIME types in `_CT`.
+triggers native behavior in billions of devices.
+
+`/raw` is the universal adapter. One route. Correct Content-Type.
+The device does the rest. No SDK. No client code. No app.
+
+Every entry in `_CT` is a potential surface. Every MIME type that
+triggers native behavior in an OS, browser, or app is a free
+integration waiting to happen.
 
 ## Selection criteria
 
