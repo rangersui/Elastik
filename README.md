@@ -585,6 +585,53 @@ One tool. Any machine. Any universe.
 When AI can send any strings to another program directly, MCP stays —
 not as a translator, but as a token isolator.
 
+## Remote MCP (HTTP mode)
+
+Same `mcp_server.py`, different transport. stdio is for local clients;
+HTTP is for hosted agents (Claude.ai remote MCP, etc.):
+
+```bash
+python mcp_server.py --http
+```
+
+To the outside world, it's a micro pastebin. POST `/mcp` with the right
+credentials routes to the real MCP handler; everything else is stored as
+an ephemeral paste under a 6-char key. The disguise is not a ruse —
+it's a real in-RAM 1MB-capped pastebin that doubles as cover. You can
+actually use it.
+
+Two scenarios, two mechanisms, no overlap:
+
+| Scenario | Mechanism |
+|---|---|
+| Direct (phone, Tailscale, LAN) | Knock sequence → IP whitelist with TTL |
+| Proxied (Claude.ai via tunnel) | Anthropic egress IP + URL secret `/mcp?k=<token>` |
+
+Claude.ai cannot send custom headers to remote MCP servers, so the
+secret rides in the URL. It is scoped: a leaked `?k=` is useless from
+any IP outside Anthropic's egress range (`160.79.104.0/21`, `2607:6bc0::/48`).
+Kerckhoffs's principle — the design is open, only the key is secret.
+
+```bash
+# Publish via cloudflared
+cloudflared tunnel --url http://localhost:3006
+# Claude.ai URL: https://<tunnel>.trycloudflare.com/mcp?k=<ELASTIK_MCP_TOKEN>
+```
+
+Env:
+```
+ELASTIK_MCP_PORT=3006                      # listen port
+ELASTIK_MCP_BIND=127.0.0.1                 # bind addr
+ELASTIK_MCP_TOKEN=<random>                 # URL secret (proxy scenario)
+ELASTIK_KNOCK=/12chars.../,/another.../    # knock paths (direct scenario)
+ELASTIK_TRUST_PROXY_HEADER=cf-connecting-ip
+ELASTIK_TRUST_PROXY_FROM=127.0.0.1/32      # CIDR allowed to set that header
+```
+
+Refuses to start without at least one auth mechanism. Only the `http`
+tool is exposed — the `mcp_call` aggregator is deliberately omitted so
+remote callers cannot reach other local MCP servers.
+
 ---
 
 ## Roadmap

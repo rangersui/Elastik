@@ -22,35 +22,37 @@ _endpoints_mtime = 0   # last mtime of endpoints.json
 _DEFAULT_BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
 
 def _reload_endpoints():
-    """Re-read endpoints.json if changed on disk. Fallback to env var."""
-    global _endpoints_mtime
+    """Re-read endpoints.json if changed on disk. Fallback to env var.
+    Atomically rebinds the module global -- concurrent readers that
+    capture the returned snapshot always see a consistent dict."""
+    global _endpoints, _endpoints_mtime
     if not ENDPOINTS.exists():
         if "default" not in _endpoints:
-            _endpoints["default"] = _DEFAULT_BASE
-        return
+            _endpoints = {"default": _DEFAULT_BASE}
+        return _endpoints
     try:
         mt = ENDPOINTS.stat().st_mtime
         if mt == _endpoints_mtime:
-            return
-        _endpoints_mtime = mt
+            return _endpoints
         data = json.loads(ENDPOINTS.read_text())
-        _endpoints.clear()
-        _endpoints.update(data)
-        # ensure default always exists
-        if "default" not in _endpoints:
-            _endpoints["default"] = _DEFAULT_BASE
+        new = dict(data)
+        if "default" not in new:
+            new["default"] = _DEFAULT_BASE
+        _endpoints = new
+        _endpoints_mtime = mt
     except (json.JSONDecodeError, OSError):
         pass
+    return _endpoints
 
 
 def _do_http(method, path, body="", headers="", target="default", timeout=30):
     """Core HTTP logic -- shared by both official and mini MCP."""
-    _reload_endpoints()
+    eps = _reload_endpoints()
     if target == "__list__":
-        return json.dumps(_endpoints, indent=2)
-    if target not in _endpoints:
-        return json.dumps({"error": f"target '{target}' not in endpoints.json. available: {list(_endpoints.keys())}"})
-    base = _endpoints[target]
+        return json.dumps(eps, indent=2)
+    if target not in eps:
+        return json.dumps({"error": f"target '{target}' not in endpoints.json. available: {list(eps.keys())}"})
+    base = eps[target]
     # guard: path must be a path, not a URL or authority injection
     if not path.startswith("/"):
         path = "/" + path
@@ -73,6 +75,42 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
         return json.dumps({"status": e.code, "target": target, "base": base, "body": e.read().decode()})
     except URLError as e:
         return json.dumps({"status": 0, "target": target, "base": base, "body": str(e.reason)})
+
+
+# -- Tool descriptor shared by mini and http modes --
+
+_MINI_TOOLS = [{
+    "name": "http",
+    "description": "elastik HTTP interface -- hot-pluggable multi-target. "
+        "FIRST ACTION: call GET /info to discover all routes. "
+        "Use target='__list__' to see all endpoints.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "method": {"type": "string", "description": "GET or POST"},
+            "path": {"type": "string", "description": "e.g. /default/read, /stages"},
+            "body": {"type": "string", "description": "request body (POST)", "default": ""},
+            "headers": {"type": "string", "description": "JSON headers (optional)", "default": ""},
+            "target": {"type": "string", "description": "endpoint name from endpoints.json", "default": "default"},
+            "timeout": {"type": "integer", "description": "timeout in seconds", "default": 30},
+        },
+        "required": ["method", "path"],
+    },
+}]
+
+
+def _mini_tool_handler(name, args):
+    """Shared tool dispatch for mini and http modes."""
+    if name == "http":
+        return _do_http(
+            method=args.get("method", "GET"),
+            path=args.get("path", "/"),
+            body=args.get("body", ""),
+            headers=args.get("headers", ""),
+            target=args.get("target", "default"),
+            timeout=args.get("timeout", 30),
+        )
+    raise ValueError(f"unknown tool: {name}")
 
 
 # -- MCP aggregator -- per-call connection to configured servers --
@@ -207,39 +245,6 @@ def _run_mini():
     """Mini MCP mode -- zero dependency, stdio JSON-RPC."""
     from mini_mcp import serve
 
-    tools = [
-        {
-            "name": "http",
-            "description": "elastik HTTP interface -- hot-pluggable multi-target. "
-                "FIRST ACTION: call GET /info to discover all routes. "
-                "Use target='__list__' to see all endpoints.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "method": {"type": "string", "description": "GET or POST"},
-                    "path": {"type": "string", "description": "e.g. /default/read, /stages"},
-                    "body": {"type": "string", "description": "request body (POST)", "default": ""},
-                    "headers": {"type": "string", "description": "JSON headers (optional)", "default": ""},
-                    "target": {"type": "string", "description": "endpoint name from endpoints.json", "default": "default"},
-                    "timeout": {"type": "integer", "description": "timeout in seconds", "default": 30},
-                },
-                "required": ["method", "path"],
-            },
-        }
-    ]
-
-    def tool_handler(name, args):
-        if name == "http":
-            return _do_http(
-                method=args.get("method", "GET"),
-                path=args.get("path", "/"),
-                body=args.get("body", ""),
-                headers=args.get("headers", ""),
-                target=args.get("target", "default"),
-                timeout=args.get("timeout", 30),
-            )
-        raise ValueError(f"unknown tool: {name}")
-
     _reload_endpoints()
     print(f"\n  elastik MCP bridge (mini -- zero dependency)", file=sys.stderr)
     print(f"  http targets:", file=sys.stderr)
@@ -247,16 +252,19 @@ def _run_mini():
         print(f"    {name} -> {url}", file=sys.stderr)
     print(f"  note: mcp_call unavailable (install mcp for full aggregator)", file=sys.stderr)
     print(file=sys.stderr)
-    serve(tools, tool_handler)
+    serve(_MINI_TOOLS, _mini_tool_handler)
 
 
 def _run_http():
     """HTTP mode -- pastebin disguise + knock/bearer gated MCP.
 
-    Runs a second HTTP port alongside (or instead of) stdio. To the outside
+    Runs an HTTP server instead of the stdio transport. To the outside
     world this is a plain pastebin. IPs that complete the knock sequence (or
     requests bearing the right bearer token) get POST /mcp routed to the
     real MCP handler. Everything else is pastebin.
+
+    Only the `http` tool is exposed -- the `mcp_call` aggregator is deliberately
+    omitted so remote callers cannot reach other local MCP servers.
 
     server.py stays untouched. This process talks to server.py via _do_http
     (localhost-only if you configure it so).
@@ -348,7 +356,7 @@ def _run_http():
         print("  refusing to start http mode: need ELASTIK_KNOCK, or (ELASTIK_MCP_TOKEN + ELASTIK_ANTHROPIC_IPS)", file=sys.stderr)
         sys.exit(1)
 
-    PASTE_MAX = 16
+    PASTE_MAX = 256
     PASTE_SIZE = 4096
     MAX_BODY = 1024 * 1024  # 1MB cap for MCP requests
     SLIDE_EXTEND = 120      # seconds added on each active call
@@ -378,6 +386,14 @@ def _run_http():
             if _knock[k][1] < cutoff:
                 _knock.pop(k, None)
 
+    def gc_whitelist():
+        if len(_whitelist) < 1024:
+            return
+        now = _time.time()
+        for k in list(_whitelist.keys()):
+            if _whitelist[k] < now:
+                _whitelist.pop(k, None)
+
     def advance_knock(ip, path):
         if not KNOCK:
             return
@@ -398,6 +414,7 @@ def _run_http():
             _knock.pop(ip, None)
 
     def is_whitelisted(ip):
+        gc_whitelist()
         exp = _whitelist.get(ip)
         if not exp:
             return False
@@ -440,37 +457,6 @@ def _run_http():
 
     def paste_get(key):
         return _pastes.get(key)
-
-    _TOOLS = [{
-        "name": "http",
-        "description": "elastik HTTP interface -- hot-pluggable multi-target. "
-            "FIRST ACTION: call GET /info to discover all routes. "
-            "Use target='__list__' to see all endpoints.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "method": {"type": "string", "description": "GET or POST"},
-                "path": {"type": "string", "description": "e.g. /default/read, /stages"},
-                "body": {"type": "string", "description": "request body (POST)", "default": ""},
-                "headers": {"type": "string", "description": "JSON headers (optional)", "default": ""},
-                "target": {"type": "string", "description": "endpoint name", "default": "default"},
-                "timeout": {"type": "integer", "description": "timeout seconds", "default": 30},
-            },
-            "required": ["method", "path"],
-        },
-    }]
-
-    def _tool_handler(name, args):
-        if name == "http":
-            return _do_http(
-                method=args.get("method", "GET"),
-                path=args.get("path", "/"),
-                body=args.get("body", ""),
-                headers=args.get("headers", ""),
-                target=args.get("target", "default"),
-                timeout=args.get("timeout", 30),
-            )
-        raise ValueError(f"unknown tool: {name}")
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -559,7 +545,7 @@ def _run_http():
                     extend_whitelist(ip)
                 try:
                     text = body.decode("utf-8", "replace")
-                    resp = handle_message(text, _TOOLS, _tool_handler)
+                    resp = handle_message(text, _MINI_TOOLS, _mini_tool_handler)
                 except Exception as e:
                     print(f"  mcp handler error: {e}", file=sys.stderr)
                     return self._send(500, "error\n")
