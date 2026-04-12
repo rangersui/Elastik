@@ -5,5 +5,19 @@
   "display": "standalone",
   "background_color": "#000",
   "theme_color": "#000",
-  "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}]
+  "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [{"name": "file", "accept": ["*/*"]}]
+    }
+  },
+  "protocol_handlers": [
+    {"protocol": "web+elastik", "url": "/%s"}
+  ]
 }

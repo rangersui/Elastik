@@ -307,6 +307,26 @@ async def app(scope, receive, send):
         await send({"type":"http.response.start","status":200,"headers":[[b"content-type",b"image/png"]]})
         await send({"type":"http.response.body","body":ICON})
         return
+    # Web Share Target — phone share sheet → store in "shared" world
+    if method == "POST" and path == "/share":
+        try: body = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        qs = scope.get("query_string", b"").decode()
+        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        # Collect shared content from query params + body
+        from urllib.parse import unquote_plus as unquote
+        parts = []
+        for k in ("title", "text", "url"):
+            v = unquote(params.get(k, ""))
+            if v: parts.append(v)
+        if body and body.strip(): parts.append(body.strip())
+        content = "\n".join(parts) if parts else "(empty share)"
+        ts = __import__('time').strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"\n---\n{ts}\n{content}\n"
+        c = conn("shared")
+        c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(entry,)); c.commit()
+        # Redirect to /shared so user sees what they shared
+        return await send_r(send, 302, "", extra_headers=[[b"location", b"/shared"]])
     if method == "GET" and path == "/stages":
         stages = []
         if DATA.exists():
