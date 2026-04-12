@@ -22,8 +22,8 @@ def _get_approve_token(scope):
     return ""
 
 async def auth_middleware(scope, path, method):
-    # GET always open
-    if method == "GET": return True
+    # Read + discovery methods always open. Plugin dispatch gates per-route.
+    if method in ("GET", "HEAD", "OPTIONS", "PROPFIND"): return True
     parts = [p for p in path.split("/") if p]
     # Admin + config + postman = approve token required — checked FIRST, before any bypass
     if path.startswith("/admin/") or path.startswith("/proxy") or (len(parts) >= 1 and parts[0].startswith("config-") and method == "POST"):

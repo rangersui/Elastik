@@ -192,15 +192,17 @@ async def app(scope, receive, send):
     handler, matched = _match_plugin(base_path)
     if handler:
         level = _plugin_auth.get(matched, "none")
-        if level == "approve":
-            if not APPROVE_TOKEN:
-                return await send_r(send, 403, '{"error":"approve token not configured"}')
-            if not _check_basic_auth(scope):
-                return await send_r(send, 401, '{"error":"authentication required"}',
-                                    extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
-        elif level == "auth":
-            if not _check_auth_token(scope):
-                return await send_r(send, 403, '{"error":"unauthorized"}')
+        # OPTIONS is capability discovery — always allow so WebDAV/CORS works.
+        if method != "OPTIONS":
+            if level == "approve":
+                if not APPROVE_TOKEN:
+                    return await send_r(send, 403, '{"error":"approve token not configured"}')
+                if not _check_basic_auth(scope):
+                    return await send_r(send, 401, '{"error":"authentication required"}',
+                                        extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+            elif level == "auth":
+                if not _check_auth_token(scope):
+                    return await send_r(send, 403, '{"error":"unauthorized"}')
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         qs = scope.get("query_string", b"").decode()
