@@ -585,6 +585,98 @@ One tool. Any machine. Any universe.
 When AI can send any strings to another program directly, MCP stays —
 not as a translator, but as a token isolator.
 
+## Remote MCP (HTTP mode)
+
+Same `mcp_server.py`, different transport. stdio is for local clients;
+HTTP is for anything that reaches you over a tunnel:
+
+```bash
+python mcp_server.py --http
+```
+
+Listens on `127.0.0.1:3006`. To the outside world it's a micro pastebin
+— POST anything, get back a 6-char key; GET the key, get the body.
+That's a real in-RAM 1MB-capped pastebin, not a fake — you can actually
+use it. POST `/mcp` is the only special route, and only if the request
+passes one of the two independent auth paths below. Anything else is
+stored as a paste, indistinguishable from normal pastebin traffic.
+
+**Two independent auth paths. Pick either, or enable both.**
+
+### Path A — Direct knock (no URL token)
+
+For clients whose real IP is visible to the server: phone browser,
+a-Shell, laptop curl, Tailscale/LAN, any device **not** going through
+a hosted LLM.
+
+The client hits a sequence of secret URLs **in order within
+`KNOCK_WINDOW` seconds**. Each one looks like a normal pastebin 404
+miss; the server silently advances state. When the sequence completes,
+the client's real IP goes into an in-memory whitelist for `KNOCK_TTL`
+seconds. Subsequent `/mcp` POSTs from that IP route to MCP with **no
+URL token required**. Wrong-order paths reset state instantly. Active
+sessions slide the TTL forward on every authorized call.
+
+```bash
+# Knock, then POST. Same IP throughout the sequence.
+T=https://<your-tunnel>.trycloudflare.com
+curl $T/kn-firstSecretPath
+curl $T/kn-secondSecretPath
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' $T/mcp
+```
+
+Anthropic egress IPs are **rejected from knock**. A hosted LLM can
+never accidentally whitelist its shared exit IP — proxied clients must
+use Path B.
+
+### Path B — Proxied bearer (Anthropic egress + URL secret)
+
+For hosted LLMs that can't send custom headers (e.g. Claude.ai's remote
+MCP feature). The request arrives from Anthropic's egress network and
+the shared secret rides in the URL query:
+
+```
+https://<your-tunnel>.trycloudflare.com/mcp?k=<ELASTIK_MCP_TOKEN>
+```
+
+Authorization requires **both**:
+1. Source IP inside an Anthropic egress CIDR (default:
+   `160.79.104.0/21`, `2607:6bc0::/48`)
+2. Constant-time HMAC match on `?k=` against `ELASTIK_MCP_TOKEN`
+
+A leaked URL is useless from any IP outside that range. Kerckhoffs's
+principle — open design, only the key is secret.
+
+---
+
+**Publish via cloudflared**:
+
+```bash
+cloudflared tunnel --url http://localhost:3006
+```
+
+**Env**:
+```
+ELASTIK_MCP_PORT=3006                       # listen port
+ELASTIK_MCP_BIND=127.0.0.1                  # bind addr
+ELASTIK_MCP_TOKEN=<random>                  # Path B: URL secret
+ELASTIK_KNOCK=/kn-long1/,/kn-long2/         # Path A: knock paths (each >= 12 chars)
+ELASTIK_KNOCK_WINDOW=10                     # Path A: seconds to complete sequence
+ELASTIK_KNOCK_TTL=600                       # Path A: whitelist lifetime per IP
+ELASTIK_TRUST_PROXY_HEADER=cf-connecting-ip # header to read real IP from
+ELASTIK_TRUST_PROXY_FROM=127.0.0.1/32       # CIDR(s) allowed to set that header
+```
+
+`TRUST_PROXY_HEADER` is mandatory when behind cloudflared — otherwise
+the server sees `127.0.0.1` for every request and a single successful
+knock would whitelist the tunnel itself.
+
+Refuses to start without at least one of (`ELASTIK_KNOCK`,
+`ELASTIK_MCP_TOKEN + ELASTIK_ANTHROPIC_IPS`). Only the `http` tool is
+exposed — `mcp_call` is deliberately omitted so remote callers cannot
+reach other local MCP servers.
+
 ---
 
 ## Roadmap
