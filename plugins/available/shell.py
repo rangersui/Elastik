@@ -1,16 +1,23 @@
 """Shell — root terminal UI + /exec POST endpoint. Approve auth.
 
-GET /shell  → shell.html (user substituted from Basic Auth user field)
+GET /shell  → shell UI from shell-ui world (or fallback)
 POST /exec  → bash/powershell, 30s timeout, text/plain output.
 """
 DESCRIPTION = "/shell UI + /exec POST. Approve auth."
 AUTH = "approve"
 import base64, platform, subprocess
-from pathlib import Path
 import server
 
-_SHELL = Path(server.__file__).resolve().parent / "shell.html"
-SHELL_HTML = _SHELL.read_text(encoding="utf-8") if _SHELL.exists() else ""
+def _load_shell_html():
+    """Load shell HTML from shell-ui world."""
+    try:
+        c = server.conn("shell-ui")
+        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        html = r["stage_html"] or ""
+        if isinstance(html, bytes): html = html.decode("utf-8", "replace")
+        return html
+    except Exception:
+        return ""
 
 
 def _basic_user(scope):
@@ -26,7 +33,8 @@ async def handle(method, body, params):
     scope = params.get("_scope", {})
     path = scope.get("path", "")
     if method == "GET" and path == "/shell":
-        if not SHELL_HTML: return {"error": "shell.html missing", "_status": 404}
+        SHELL_HTML = _load_shell_html()
+        if not SHELL_HTML: return {"error": "shell-ui world empty", "_status": 404}
         html = SHELL_HTML.replace("__ELASTIK_USER__", _basic_user(scope))
         return {"_html": html}
     if method == "POST" and path == "/exec":

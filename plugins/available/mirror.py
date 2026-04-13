@@ -6,11 +6,17 @@
 DESCRIPTION = "Reverse-proxy mirror. /mirror?url=X entry, /m/domain/path follow-up."
 AUTH = "approve"
 import json, re, subprocess
-from pathlib import Path
 import server
 
-_MIRROR_HTML = (Path(server.__file__).resolve().parent / "mirror.html")
-_UI = _MIRROR_HTML.read_text(encoding="utf-8") if _MIRROR_HTML.exists() else ""
+def _load_mirror_ui():
+    try:
+        c = server.conn("mirror-ui")
+        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        html = r["stage_html"] or ""
+        if isinstance(html, bytes): html = html.decode("utf-8", "replace")
+        return html
+    except Exception:
+        return ""
 
 
 def _proxy(target, domain=""):
@@ -64,6 +70,7 @@ async def handle(method, body, params):
     target, domain = _target(path, qs)
     if not target:
         # /mirror with no ?url= → show the entry form page.
+        _UI = _load_mirror_ui()
         if method == "GET" and path in ("/mirror", "/mirror/") and _UI:
             return {"_html": _UI}
         return {"error": "invalid mirror path", "_status": 400}

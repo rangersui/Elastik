@@ -133,13 +133,9 @@ Different keys. Not "shouldn't." **Can't.**
 ## Connect AI
 
 ```bash
-# Any AI with curl/bash — just POST
 curl -X POST http://localhost:3005/work/write \
   -H "Authorization: Bearer $TOKEN" \
   -d '<h1>hello world</h1>'
-
-# MCP (Claude Desktop, Cursor, etc.)
-# Point to mcp_server.py — it translates MCP→HTTP
 ```
 
 If it can send a string, it's an elastik client.
