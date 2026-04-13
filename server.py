@@ -1,6 +1,7 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
 import asyncio, base64, hashlib, hmac as _hmac, json, os, re, sqlite3, sys
 from pathlib import Path
+if __name__ == "__main__": sys.modules["server"] = sys.modules[__name__]
 
 DATA = Path("data")
 # Load env file: .env, _env, .env.local (iOS doesn't support dotfiles)
