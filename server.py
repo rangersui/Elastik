@@ -20,7 +20,6 @@ HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
-OPENAPI = Path(__file__).with_name("openapi.json").read_text(encoding="utf-8")
 SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
 _icon_path = Path(__file__).with_name("icon.png")
@@ -301,7 +300,6 @@ async def app(scope, receive, send):
                f'<Url type="text/html" template="{scheme}://{host}/shell?q={{searchTerms}}"/>'
                f'</OpenSearchDescription>')
         return await send_r(send, 200, xml, ct="application/opensearchdescription+xml")
-    if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
     if method == "GET" and path == "/manifest.json": return await send_r(send, 200, MANIFEST, "application/manifest+json")
     if method == "GET" and path == "/icon.png" and ICON:

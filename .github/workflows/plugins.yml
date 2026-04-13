@@ -5,7 +5,6 @@ on:
     branches: [master]
     paths:
       - 'plugins/**'
-      - 'go/native/**'
       - 'server.py'
       - 'plugins.py'
       - 'tests/test_plugins.py'
@@ -13,7 +12,6 @@ on:
   pull_request:
     paths:
       - 'plugins/**'
-      - 'go/native/**'
       - 'server.py'
       - 'plugins.py'
       - 'tests/test_plugins.py'
@@ -34,14 +32,5 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-          cache-dependency-path: go/go.sum
-
-      - name: Build Go binary
-        working-directory: go/native
-        run: go build -o ../../elastik-lite${{ runner.os == 'Windows' && '.exe' || '' }} .
-
-      - name: Run plugin tests (CGI + Go HTTP — no Ollama in CI)
-        run: python tests/test_plugins.py go
+      - name: Run plugin tests
+        run: python tests/test_plugins.py python
