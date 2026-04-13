@@ -69,7 +69,6 @@ Included plugins:
 
 | Plugin | What it does |
 |--------|-------------|
-| auth | Token gate for writes |
 | admin | Load/unload plugins at runtime |
 | dav | WebDAV — worlds as files |
 | shell | Browser terminal |
