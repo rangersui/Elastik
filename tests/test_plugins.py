@@ -543,6 +543,23 @@ def _run_auth_tests(port, label, token, approve):
     test(f"{label} auth: config-*/read -> data persisted",
          st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
 
+    # ── CSRF gate: sync/result/clear reject cross-origin ──
+
+    st, _ = http_method(port, "/authtest/sync", method="POST", body="x",
+                        headers={"Origin": "http://evil.com"})
+    test(f"{label} csrf: sync cross-origin -> 403", st == 403, f"status={st}")
+
+    st, _ = http_method(port, "/authtest/result", method="POST", body="x",
+                        headers={"Origin": "http://evil.com"})
+    test(f"{label} csrf: result cross-origin -> 403", st == 403, f"status={st}")
+
+    st, _ = http_method(port, "/authtest/sync", method="POST", body="same-origin",
+                        headers={"Origin": "http://localhost:13007"})
+    test(f"{label} csrf: sync same-origin -> 200", st == 200, f"status={st}")
+
+    st, _ = http_method(port, "/authtest/sync", method="POST", body="no-origin")
+    test(f"{label} csrf: sync no origin -> 200", st == 200, f"status={st}")
+
 
 def _run_plugin_auth_tests(port, label, token, approve):
     """Auth tests for plugin routes: shell, exec, mirror, view, dav."""

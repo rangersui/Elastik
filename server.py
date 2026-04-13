@@ -353,6 +353,13 @@ async def app(scope, receive, send):
                     return await send_r(send, 403, '{"error":"config write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
+        # CSRF gate: browser-only actions check Origin (physics, not policy)
+        if action in ("sync", "result", "clear"):
+            origin = ""
+            for k, v in scope.get("headers", []):
+                if k == b"origin": origin = v.decode(); break
+            if origin and not origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]")):
+                return await send_r(send, 403, '{"error":"cross-origin rejected"}')
         if method == "GET" and action == "read":
             if not (DATA / _disk_name(name) / "universe.db").exists():
                 return await send_r(send, 404, '{"error":"world not found"}')
