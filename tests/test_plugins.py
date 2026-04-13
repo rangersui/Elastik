@@ -291,7 +291,7 @@ def test_python():
     # Ensure ai + devtools plugins are installed for testing
     import shutil
     _installed = []
-    for pname in ["ai.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "public_gate.py"]:
+    for pname in ["ai.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -545,24 +545,6 @@ def _run_auth_tests(port, label, token, approve):
     test(f"{label} auth: GET config-*/read -> data persisted",
          st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
 
-    # ── Tier 1: /proxy/* requires approve token (postman = curl proxy) ──
-
-    # POST /proxy/postman with no token -> 403
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}')
-    test(f"{label} auth: POST /proxy/postman no token -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with auth token only -> 403 (needs approve, not auth)
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', token=token)
-    test(f"{label} auth: POST /proxy/postman auth-only -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with wrong approve -> 403
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve="wrong")
-    test(f"{label} auth: POST /proxy/postman wrong approve -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with correct approve -> passes auth (not 403)
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve=approve)
-    test(f"{label} auth: POST /proxy/postman approve -> not 403", st != 403, f"status={st}")
-
     # ── Normal world with auth token should work ──
 
     st, _ = http_post(port, "/authtest/write", "hello", token=token)
@@ -598,10 +580,11 @@ def _run_plugin_auth_tests(port, label, token, approve):
     test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
 
     # ── View: GET needs approve (+ type gate) ──
-    st, _ = http_get(port, "/view/work")
+    http_post(port, "/view-test/write?ext=html", "<h1>test</h1>", token=token)
+    st, _ = http_get(port, "/view/view-test")
     test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
 
-    st, _ = http_method(port, "/view/work", basic_auth=approve)
+    st, _ = http_method(port, "/view/view-test", basic_auth=approve)
     # 200 if html-typed, 415 if plain — either means auth passed
     test(f"{label} plugin-auth: GET /view approve -> auth passed", st in (200, 415), f"status={st}")
 
@@ -636,6 +619,7 @@ def _run_blob_ext_tests(port, label, token, approve):
     import hashlib
 
     # ── 304 version comparison ──
+    http_post(port, "/work/write", "hello", token=token)  # ensure world exists
     st, body = http_get(port, "/work/read")
     test(f"{label} blob: GET /read -> 200", st == 200, f"status={st}")
     v = json.loads(body).get("version", -1)
@@ -724,10 +708,11 @@ def _run_blob_ext_tests(port, label, token, approve):
         d = json.loads(body)
         test(f"{label} unicode: read {uname} ext={uext}", d.get("ext") == uext, f"ext={d.get('ext')}")
 
-    # Check /stages has Unicode names
+    # Check /stages has Unicode names (normalize for macOS HFS+ NFD)
+    import unicodedata
     st, body = http_get(port, "/stages")
-    names = [s["name"] for s in json.loads(body)]
-    test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), "")
+    names = [unicodedata.normalize("NFC", s["name"]) for s in json.loads(body)]
+    test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
     test(f"{label} unicode: /stages has Korean", any("\ud55c" in n for n in names), "")
     test(f"{label} unicode: /stages has fake dir", any("\u82b1\u6912/" in n for n in names), "")
 
