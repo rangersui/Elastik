@@ -25,6 +25,8 @@ SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
 _icon_path = Path(__file__).with_name("icon.png")
 ICON = _icon_path.read_bytes() if _icon_path.exists() else None
+_icon192_path = Path(__file__).with_name("icon-192.png")
+ICON192 = _icon192_path.read_bytes() if _icon192_path.exists() else None
 def _csp():
     cdn = "https:"
     try:
@@ -306,6 +308,10 @@ async def app(scope, receive, send):
     if method == "GET" and path == "/icon.png" and ICON:
         await send({"type":"http.response.start","status":200,"headers":[[b"content-type",b"image/png"]]})
         await send({"type":"http.response.body","body":ICON})
+        return
+    if method == "GET" and path == "/icon-192.png" and ICON192:
+        await send({"type":"http.response.start","status":200,"headers":[[b"content-type",b"image/png"]]})
+        await send({"type":"http.response.body","body":ICON192})
         return
     # Web Share Target — phone share sheet → store in "shared" world
     if method == "POST" and path == "/share":
