@@ -145,8 +145,14 @@ async def handle(method, body, params):
         if not name: return {"error":"DELETE on collection not supported", "_status":405}
         if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
-        c = server.conn(name)
-        c.execute("UPDATE stage_meta SET stage_html='',pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
+        if server._check_auth(scope) != "approve":
+            return {"error": "delete requires approve", "_status": 403}
+        if name in server._db: server._db.pop(name).close()
+        import shutil
+        trash = server.DATA / ".trash" / server._disk_name(name)
+        trash.parent.mkdir(parents=True, exist_ok=True)
+        if trash.exists(): shutil.rmtree(trash)
+        (server.DATA / server._disk_name(name)).rename(trash)
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MKCOL":

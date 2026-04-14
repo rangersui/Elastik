@@ -1,5 +1,5 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
-import asyncio, base64, hashlib, hmac as _hmac, json, os, re, sqlite3, sys
+import asyncio, base64, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, sys
 from pathlib import Path
 if __name__ == "__main__": sys.modules["server"] = sys.modules[__name__]
 
@@ -345,6 +345,20 @@ async def app(scope, receive, send):
                     r = conn(name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
                     stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
         return await send_r(send, 200, json.dumps(stages))
+
+    # DELETE /{name} → approve only → move to .trash
+    if method == "DELETE" and len(parts) >= 1:
+        name = "/".join(parts)
+        if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+        db = DATA / _disk_name(name) / "universe.db"
+        if not db.exists(): return await send_r(send, 404, '{"error":"world not found"}')
+        if _check_auth(scope) != "approve": return await send_r(send, 403, '{"error":"delete requires approve"}')
+        if name in _db: _db.pop(name).close()
+        trash = DATA / ".trash" / _disk_name(name)
+        trash.parent.mkdir(parents=True, exist_ok=True)
+        if trash.exists(): shutil.rmtree(trash)
+        (DATA / _disk_name(name)).rename(trash)
+        return await send_r(send, 200, json.dumps({"deleted": name}))
 
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
     if len(parts) >= 2 and parts[-1] in _ACTIONS:
