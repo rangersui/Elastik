@@ -26,11 +26,12 @@ Every path is a world. Writing to a new path creates it.
 ## API
 
 ```
-GET  /{name}/read      read content + version
-GET  /{name}/raw       raw bytes with correct Content-Type
-POST /{name}/write     overwrite content (version++)
-POST /{name}/append    append to content (version++)
-GET  /stages           list all worlds
+GET    /{name}/read     read content + version
+GET    /{name}/raw      raw bytes with correct Content-Type
+POST   /{name}/write    overwrite content (version++)
+POST   /{name}/append   append to content (version++)
+DELETE /{name}          delete world (approve token required)
+GET    /stages          list all worlds
 ```
 
 Polling: `GET /{name}/read?v=3` → returns 304 if version unchanged.
@@ -123,10 +124,10 @@ index.html      one iframe, one polling loop
 physics > policy > training > luck
 ```
 
-iframe sandbox (frontend). Docker optional (backend). Bearer auth (API). HMAC chain (audit).
+iframe sandbox + CSP `connect-src 'none'` (frontend). Docker optional (backend). Bearer auth (API). HMAC chain (audit).
 
-AI holds `ELASTIK_TOKEN`. Can read/write. Cannot install plugins.
-Human holds `ELASTIK_APPROVE_TOKEN`. Can do everything.
+AI holds `ELASTIK_TOKEN`. Can read/write. Cannot delete or install plugins.
+Human holds `ELASTIK_APPROVE_TOKEN`. Can do everything. Delete goes to `.trash/`.
 Different keys. Not "shouldn't." **Can't.**
 
 ## Connect AI
