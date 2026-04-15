@@ -29,7 +29,7 @@ import server
 
 DESCRIPTION = "Server-sent events — push per-world updates on version change"
 ROUTES = ["/stream"]   # prefix match: /stream/foo, /stream/a/b
-AUTH = "auth"          # same level as /read — token required
+AUTH = "none"          # matches /read — reads are public (browsers can't send Authorization header via EventSource)
 
 PARAMS_SCHEMA = {
     "/stream/{name}": {
@@ -39,8 +39,8 @@ PARAMS_SCHEMA = {
     },
 }
 
-_POLL = 0.1       # internal DB poll interval (seconds)
-_HB_EVERY = 30    # heartbeat every N polls (3s at 100ms)
+_POLL = 0.02      # internal DB poll interval (seconds) — 20ms → up to 50 events/sec
+_HB_EVERY = 150   # heartbeat every N polls (3s at 20ms)
 
 
 async def handle(method, body, params):
@@ -76,26 +76,36 @@ async def handle(method, body, params):
     })
 
     def _snapshot():
-        r = c.execute("SELECT stage_html,version,ext FROM stage_meta WHERE id=1").fetchone()
+        """Full snapshot — version + stage + pending_js + js_result.
+        Returns (signature_tuple, json_payload). Signature lets us detect
+        any of the four fields changing, not just version."""
+        r = c.execute(
+            "SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1"
+        ).fetchone()
         raw = r["stage_html"] or ""
         if isinstance(raw, bytes):
             try: raw = raw.decode("utf-8")
             except UnicodeDecodeError: raw = ""
         ext = r["ext"] or "html"
-        return r["version"], json.dumps({
+        pj = r["pending_js"] or ""
+        jr = r["js_result"] or ""
+        sig = (r["version"], pj, jr)
+        payload = json.dumps({
             "version": r["version"], "stage_html": raw,
+            "pending_js": pj, "js_result": jr,
             "ext": ext, "type": ext,
         }, ensure_ascii=False)
+        return sig, payload
 
-    last_v = -1
+    last_sig = None
     ticks = 0
     try:
         while True:
-            v, data = _snapshot()
-            if v != last_v:
+            sig, data = _snapshot()
+            if sig != last_sig:
                 msg = f"event: update\ndata: {data}\n\n".encode("utf-8")
                 await send({"type": "http.response.body", "body": msg, "more_body": True})
-                last_v = v
+                last_sig = sig
                 ticks = 0
             else:
                 ticks += 1
