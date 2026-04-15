@@ -499,9 +499,18 @@ async def app(scope, receive, send):
 
 # ── Mini ASGI server — zero dependencies ─────────────────────────────
 
+_REASONS = {200:"OK",201:"Created",204:"No Content",206:"Partial Content",
+            301:"Moved Permanently",302:"Found",304:"Not Modified",
+            400:"Bad Request",401:"Unauthorized",403:"Forbidden",404:"Not Found",
+            405:"Method Not Allowed",413:"Payload Too Large",
+            500:"Internal Server Error"}
+
 async def _mini_serve(asgi_app, host, port):
-    """Zero-dependency ASGI server. Enough for single-user localhost."""
+    """Zero-dependency ASGI server. Enough for single-user localhost.
+    Supports streaming: if a response lacks Content-Length, automatically
+    uses Transfer-Encoding: chunked so SSE works without uvicorn."""
     async def handle(reader, writer):
+        chunked = False  # set per-response in _send
         try:
             line = await reader.readline()
             if not line: writer.close(); return
@@ -530,23 +539,40 @@ async def _mini_serve(asgi_app, host, port):
             async def _recv():
                 return {"type": "http.request", "body": body}
             async def _send(msg):
-                # Streaming-safe: send headers on start, body chunks as they arrive.
+                nonlocal chunked
                 if msg["type"] == "http.response.start":
-                    out = f"HTTP/1.1 {msg['status']} OK\r\n".encode()
-                    for k, v in msg.get("headers", []):
+                    status = msg["status"]
+                    reason = _REASONS.get(status, "OK")
+                    hdrs = msg.get("headers", [])
+                    has_cl = any(k.lower() == b"content-length" for k, v in hdrs)
+                    has_te = any(k.lower() == b"transfer-encoding" for k, v in hdrs)
+                    # No length and no transfer-encoding → use chunked so clients can frame.
+                    chunked = not has_cl and not has_te
+                    out = f"HTTP/1.1 {status} {reason}\r\n".encode()
+                    for k, v in hdrs:
+                        # Strip Connection: keep-alive — we close after one request.
+                        if k.lower() == b"connection" and v.lower() == b"keep-alive":
+                            continue
                         out += k + b": " + v + b"\r\n"
-                    out += b"\r\n"
+                    if chunked: out += b"Transfer-Encoding: chunked\r\n"
+                    out += b"Connection: close\r\n\r\n"
                     writer.write(out)
                     await writer.drain()
                 elif msg["type"] == "http.response.body":
                     chunk = msg.get("body", b"")
-                    if chunk:
+                    more = msg.get("more_body", False)
+                    if chunked:
+                        if chunk:
+                            writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                        if not more:
+                            writer.write(b"0\r\n\r\n")  # end-of-chunked marker
+                    elif chunk:
                         writer.write(chunk)
-                        await writer.drain()
+                    await writer.drain()
             await asgi_app(scope, _recv, _send)
         except Exception:
             try:
-                writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                writer.write(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n")
                 await writer.drain()
             except OSError: pass
         finally:
