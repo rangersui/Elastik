@@ -116,7 +116,12 @@ Two curls. One clone. The clone can clone itself.
 server.py       the protocol + startup. One entry point.
 plugins.py      plugin load/unload/cron
 index.html      one iframe, one polling loop
+examples/       reference implementations at different scales:
+                  mini.py  — 105 lines, no SQLite, pure stdlib
 ```
+
+elastik is not SQLite. Not a framework. Not `server.py`. It's five rules.
+Any implementation that satisfies them is elastik. `examples/mini.py` proves it.
 
 ## Security
 

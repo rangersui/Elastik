@@ -35,6 +35,12 @@ dist/
 bus.crt
 bus.key
 
+# Local-only
+openapi.json
+
 # Binaries
 *.exe
 *.exe~
+
+# mini.py test worlds
+examples/worlds/

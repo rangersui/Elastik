@@ -273,7 +273,9 @@ async def app(scope, receive, send):
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         params["_scope"] = scope
         params["_body_raw"] = body_raw  # raw bytes for binary plugins (dav PUT)
+        params["_send"] = send          # raw send for plugins that stream (SSE)
         result = await handler(method, b, params)
+        if result is None: return       # plugin streamed its own response
         status = result.pop("_status", 200)
         redirect = result.pop("_redirect", None)
         cookies = result.pop("_cookies", [])
@@ -525,20 +527,22 @@ async def _mini_serve(asgi_app, host, port):
                 "raw_path": path_part.encode(), "query_string": qs.encode(),
                 "headers": headers,
             }
-            response = {}
             async def _recv():
                 return {"type": "http.request", "body": body}
             async def _send(msg):
+                # Streaming-safe: send headers on start, body chunks as they arrive.
                 if msg["type"] == "http.response.start":
-                    response["status"] = msg["status"]
-                    response["headers"] = msg.get("headers", [])
-                elif msg["type"] == "http.response.body":
-                    out = f"HTTP/1.1 {response['status']} OK\r\n".encode()
-                    for k, v in response["headers"]:
+                    out = f"HTTP/1.1 {msg['status']} OK\r\n".encode()
+                    for k, v in msg.get("headers", []):
                         out += k + b": " + v + b"\r\n"
-                    out += b"\r\n" + msg.get("body", b"")
+                    out += b"\r\n"
                     writer.write(out)
                     await writer.drain()
+                elif msg["type"] == "http.response.body":
+                    chunk = msg.get("body", b"")
+                    if chunk:
+                        writer.write(chunk)
+                        await writer.drain()
             await asgi_app(scope, _recv, _send)
         except Exception:
             try:
