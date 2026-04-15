@@ -6,7 +6,7 @@ fetch('/grep?q=error').then(r=>r.json())  → grep
 
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
+DESCRIPTION = "Unix pipe primitives — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
 
 import sys, json, os, subprocess, time, sqlite3
 from pathlib import Path
@@ -320,6 +320,30 @@ async def handle_cowsay(method, body, params):
     return {"_html": cow, "_status": 200}
 
 
+_MOAI = """
+  ┌{border}┐
+  │ {msg} │
+  └{border}┘
+       \\
+        \\
+         🗿
+        ╱  ╲
+       ╱    ╲
+      │ ●  ● │
+      │  ──  │
+      │      │
+      ╰──────╯
+"""[1:-1]
+
+
+async def handle_moaisay(method, body, params):
+    """moaisay — because cowsay is too cheerful."""
+    text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "🗿"
+    n = max(len(text), 2)
+    moai = _MOAI.format(msg=text.ljust(n), border="─" * (n + 2))
+    return {"_html": moai, "_status": 200}
+
+
 async def handle_proxy(method, body, params):
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
@@ -340,6 +364,7 @@ ROUTES = {
     "/health": handle_health,
     "/db/size": handle_db_size,
     "/cowsay": handle_cowsay,
+    "/moaisay": handle_moaisay,
     "/whoami": handle_whoami,
     "/uuid": handle_uuid,
     "/verify": handle_verify,
