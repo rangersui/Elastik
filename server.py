@@ -422,7 +422,8 @@ async def app(scope, receive, send):
         if custom_h: extra_h.extend([[str(k).encode(), str(v).encode()] for k, v in custom_h])
         if redirect: extra_h.append([b"location", redirect.encode()]); status = 302
         if html_body is not None:
-            return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
+            _hct = "text/html" if re.search(r"<[a-zA-Z/!]", html_body) else "text/plain"
+            return await send_r(send, status, html_body, ct=_hct, extra_headers=extra_h or None)
         if raw_body is not None:
             return await send_r(send, status, raw_body, ct=ct, extra_headers=extra_h or None)
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
