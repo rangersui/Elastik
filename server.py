@@ -448,9 +448,9 @@ async def app(scope, receive, send):
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
-        if method == "GET" and (name == "etc/shadow" or name.startswith("boot/")):
-            if _check_auth(scope) != "approve":
-                return await send_r(send, 403, '{"error":"read requires approve"}')
+        # Sensitive-read gate moved into the GET handler below (after
+        # browser detection). Browser navigations always get index.html;
+        # the iframe's own fetch hits the gate separately.
         # ── CSRF for internal ops ──
         if iop:
             if method != "POST":
@@ -467,8 +467,13 @@ async def app(scope, receive, send):
             for k, v in scope.get("headers", []):
                 if k == b"accept": accept = v.decode(); break
             is_browser = accept.startswith("text/html")
+            # Browser always gets the app shell — auth errors show inside iframe
+            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
+            # Sensitive-read gate (API only — browser handled above)
+            if name == "etc/shadow" or name.startswith("boot/"):
+                if _check_auth(scope) != "approve":
+                    return await send_r(send, 403, '{"error":"read requires approve"}')
             if not (DATA / _disk_name(name) / "universe.db").exists():
-                if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
                 return await send_r(send, 404, '{"error":"world not found"}')
             # ?raw → raw bytes with correct Content-Type
             if "raw" in params or "raw" in qs.split("&"):
