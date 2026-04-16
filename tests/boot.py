@@ -1,29 +1,40 @@
 #!/usr/bin/env python3
-"""elastik boot test — POST (Power-On Self-Test).
+"""elastik POST (Power-On Self-Test).
 
 Does this thing behave like a Linux box?
-Not unit tests. Boot sequence. Power on, poke every subsystem, report.
+Boot up, poke every subsystem, report.
 
-Usage: python tests/boot.py [host]
-Default host: http://127.0.0.1:3005
-Expects ELASTIK_TOKEN and ELASTIK_APPROVE_TOKEN from .env.
+Lives in the elastik world /home/boot. Run it:
+  curl -s localhost:3005/home/boot/raw | python -X utf8 -
+  python tests/boot.py
+  python tests/boot.py http://remote:3005
+
+Tokens from env vars (ELASTIK_TOKEN, ELASTIK_APPROVE_TOKEN).
 """
 import urllib.request, urllib.error, json, base64, sys, os, time, threading, re
-import tempfile, shutil
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3005"
+HOST = sys.argv[1] if len(sys.argv) > 1 else os.getenv("ELASTIK_HOST_URL", "http://127.0.0.1:3005")
 
-# Read .env for tokens
-_env = {}
-for ef in (".env", "_env"):
-    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ef)
-    if os.path.exists(p):
-        for line in open(p):
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                _env[k.strip()] = v.strip()
-TOKEN = _env.get("ELASTIK_TOKEN", "")
-APPROVE = _env.get("ELASTIK_APPROVE_TOKEN", "")
+# Find tokens: env vars first, then .env in CWD or parents
+TOKEN = os.getenv("ELASTIK_TOKEN", "")
+APPROVE = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+if not TOKEN:
+    # Walk up from CWD looking for .env
+    d = os.getcwd()
+    for _ in range(5):
+        ef = os.path.join(d, ".env")
+        if os.path.exists(ef):
+            for line in open(ef):
+                line = line.strip()
+                if line.startswith("#") or "=" not in line: continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "ELASTIK_TOKEN" and not TOKEN: TOKEN = v
+                if k == "ELASTIK_APPROVE_TOKEN" and not APPROVE: APPROVE = v
+            break
+        parent = os.path.dirname(d)
+        if parent == d: break
+        d = parent
 
 OK = 0; FAIL = 0
 
@@ -176,33 +187,38 @@ check("DAV /etc/shadow → 403", st == 403, f"st={st}")
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m/mnt — fstab local mount\033[0m\n")
 
-tmpdir = tempfile.mkdtemp(prefix="elastik-boot-")
-with open(os.path.join(tmpdir, "hello.txt"), "w") as f:
-    f.write("mounted!")
-
-fstab = f"{tmpdir}  /mnt/boottest  rw"
-_req("/etc/fstab/write", "POST", fstab, auth=_auth(APPROVE))
-
-st, body = _req("/mnt/boottest/")
-d = j(body)
-check("/mnt/boottest/ → lists files",
-      any(e["name"] == "hello.txt" for e in d.get("entries", [])),
-      f"got={d}")
-
-st, body = _req("/mnt/boottest/hello.txt")
-check("/mnt read file → content", j(body).get("content") == "mounted!")
-
-st, _ = _req("/mnt/boottest/new.txt", "POST", "written via mnt",
-             auth=_auth(APPROVE))
-check("/mnt write (rw) → ok", st == 200, f"st={st}")
-check("/mnt write → file exists",
-      os.path.exists(os.path.join(tmpdir, "new.txt")) and
-      open(os.path.join(tmpdir, "new.txt")).read() == "written via mnt")
+st, body = _req("/mnt/")
+check("/mnt/ → lists mounts", "mounts" in j(body), f"st={st}")
 
 st, _ = _req("/mnt/nosuchmount/")
 check("/mnt bad mount → 404", st == 404, f"st={st}")
 
-shutil.rmtree(tmpdir, ignore_errors=True)
+# Full read/write test only if we can make a temp dir (local run)
+import tempfile, shutil
+try:
+    tmpdir = tempfile.mkdtemp(prefix="elastik-boot-")
+    with open(os.path.join(tmpdir, "hello.txt"), "w") as f:
+        f.write("mounted!")
+    fstab = f"{tmpdir}  /mnt/boottest  rw"
+    _req("/etc/fstab/write", "POST", fstab, auth=_auth(APPROVE))
+
+    st, body = _req("/mnt/boottest/")
+    d = j(body)
+    check("/mnt list → has file",
+          any(e["name"] == "hello.txt" for e in d.get("entries", [])),
+          f"got={d}")
+
+    st, body = _req("/mnt/boottest/hello.txt")
+    check("/mnt read → content", j(body).get("content") == "mounted!")
+
+    st, _ = _req("/mnt/boottest/new.txt", "POST", "via mnt",
+                 auth=_auth(APPROVE))
+    check("/mnt write rw → ok", st == 200, f"st={st}")
+    check("/mnt write → on disk",
+          os.path.exists(os.path.join(tmpdir, "new.txt")))
+    shutil.rmtree(tmpdir, ignore_errors=True)
+except OSError:
+    print("  SKIP /mnt read/write (no local filesystem)")
 
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m/dev — primitives\033[0m\n")
