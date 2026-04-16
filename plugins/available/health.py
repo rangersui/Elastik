@@ -1,7 +1,7 @@
 """Health plugin — system task manager with heartbeat.
 
 CRON = 60. Every minute, collects system state and writes to /var/log/health world.
-Any AI can GET /var/log/health/read to know the empire's health.
+Any AI can GET /var/log/health to know the empire's health.
 
 """
 

@@ -5,7 +5,7 @@ from email.utils import formatdate
 import hmac as _hmac, os
 import server
 
-# DAV URL → world name mirrors the HTTP scheme: /dav/home/foo ↔ /home/foo/read.
+# DAV URL → world name mirrors the HTTP scheme: /dav/home/foo ↔ GET /home/foo.
 # Worlds with these prefixes are system worlds; /home/ is the user namespace
 # and gets stripped on the wire (world "foo" is displayed at /dav/home/foo).
 _SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
