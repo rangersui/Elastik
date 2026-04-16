@@ -338,7 +338,8 @@ async def app(scope, receive, send):
         c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(entry,)); c.commit()
         # Redirect to /shared so user sees what they shared
         return await send_r(send, 302, "", extra_headers=[[b"location", b"/shared"]])
-    if method == "GET" and path == "/stages":
+    # /proc/worlds — list of worlds (was: /stages)
+    if method == "GET" and path == "/proc/worlds":
         stages = []
         if DATA.exists():
             for d in sorted(DATA.iterdir()):
@@ -348,9 +349,9 @@ async def app(scope, receive, send):
                     stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
         return await send_r(send, 200, json.dumps(stages))
 
-    # DELETE /{name} → approve only → move to .trash
-    if method == "DELETE" and len(parts) >= 1:
-        name = "/".join(parts)
+    # DELETE /home/{name} → approve only → move to .trash
+    if method == "DELETE" and len(parts) >= 2 and parts[0] == "home":
+        name = "/".join(parts[1:])  # strip "home" prefix
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         db = DATA / _disk_name(name) / "universe.db"
         if not db.exists(): return await send_r(send, 404, '{"error":"world not found"}')
@@ -362,10 +363,12 @@ async def app(scope, receive, send):
         (DATA / _disk_name(name)).rename(trash)
         return await send_r(send, 200, json.dumps({"deleted": name}))
 
+    # /home/{name}/{action} — the main world routes
+    # URL has /home/ prefix; disk storage stays at DATA/{name}/ (no migration).
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 2 and parts[-1] in _ACTIONS:
+    if len(parts) >= 3 and parts[0] == "home" and parts[-1] in _ACTIONS:
         action = parts[-1]
-        name = "/".join(parts[:-1])  # everything before the action
+        name = "/".join(parts[1:-1])  # strip "home" prefix and action
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         # All mutations require POST
         if action not in ("read", "raw") and method != "POST":
