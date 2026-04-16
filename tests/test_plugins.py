@@ -322,6 +322,7 @@ def test_python():
         _run_blob_ext_tests(py_port, "python", py_token, py_approve)
         _run_http_tests(py_port, "python", token=py_token)
         _run_devtools_tests(py_port, "python", token=py_token)
+        _run_flush_sse_test(py_port, "python", py_token)
     finally:
         proc.terminate()
         try:
@@ -796,6 +797,81 @@ def _run_http_tests(port, label, token=""):
             test(f"{label}: /proc/worlds returns array", isinstance(d, list))
         except json.JSONDecodeError:
             test(f"{label}: /proc/worlds returns JSON", False)
+
+
+def _run_flush_sse_test(port, label, token):
+    """Integration test: /flush + SSE. The toilet is the test.
+
+    Network: SSE long-connection stays open.
+    State:   world mutates through 💩 → 💧 → ✨ atomically per write.
+    Timing:  POST triggers state changes, SSE delivers them.
+    """
+    import threading
+
+    # 1. Open SSE listener in background
+    events = []
+    def sse_listen():
+        try:
+            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/stream/toilet", timeout=10)
+            buf = b""
+            while True:
+                chunk = r.read(1)
+                if not chunk: break
+                buf += chunk
+                if buf.endswith(b"\n\n"):
+                    for line in buf.decode("utf-8", "replace").strip().splitlines():
+                        if line.startswith("data: "):
+                            try:
+                                d = json.loads(line[6:])
+                                events.append(d.get("stage_html", ""))
+                            except (json.JSONDecodeError, AttributeError):
+                                pass
+                    buf = b""
+        except Exception:
+            pass
+
+    t = threading.Thread(target=sse_listen, daemon=True)
+    t.start()
+    time.sleep(0.5)
+
+    # 2. Flush
+    st, body = http_post(port, "/flush", "", token=token)
+    test(f"{label} flush: POST /flush -> 200", st == 200, f"status={st}")
+    test(f"{label} flush: returns sparkle", "\u2728" in body, f"body={body[:20]}")
+
+    # 3. Wait for SSE events to arrive
+    time.sleep(1.5)
+
+    # 4. Verify SSE captured the show
+    test(f"{label} flush: SSE got events", len(events) >= 3,
+         f"got {len(events)} events")
+    # Must start with 💩 and end with ✨
+    if events:
+        test(f"{label} flush: first event has seed",
+             "\U0001f4a9" in events[0] or "\U0001f4a9" in "".join(events[:2]),
+             f"first={events[0][:10]}")
+        test(f"{label} flush: last event is clean",
+             "\u2728" in events[-1],
+             f"last={events[-1][:10]}")
+        # Middle should have water
+        middle = "".join(events[1:-1])
+        test(f"{label} flush: middle has water",
+             "\U0001f4a7" in middle,
+             f"middle_sample={middle[:30]}")
+    else:
+        test(f"{label} flush: SSE events exist", False, "no events captured")
+
+    # 5. Verify world is clean
+    st, body = http_get(port, "/home/toilet/read")
+    if st == 200:
+        d = json.loads(body)
+        test(f"{label} flush: world is clean after",
+             "\u2728" in d.get("stage_html", ""),
+             f"stage={d.get('stage_html','')[:20]}")
+
+    # 6. Repeatable — flush again, should re-seed and re-flush
+    st, _ = http_post(port, "/flush", "", token=token)
+    test(f"{label} flush: repeatable", st == 200, f"status={st}")
 
 
 # ── Main ────────────────────────────────────────────────────────────

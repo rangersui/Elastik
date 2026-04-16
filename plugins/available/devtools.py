@@ -440,21 +440,28 @@ def _write_stage(world, content):
 
 
 async def handle_flush(method, body, params):
-    """/flush?world=toilet — progressive flush. Open /stream/toilet in
-    another tab and watch. Each stage is a real write; SSE delivers it.
+    """/flush — SSE debug tool disguised as a toilet.
 
-    Flushing is streaming, not atomic. You see every moment.
+    POST /flush?world=toilet    (default world: toilet)
+
+    Open /stream/toilet in another tab first. Then POST /flush.
+    Same SSE pipe as any world. Same debug purpose.
+    But you'll actually watch this one to the end.
+
+    If the world is empty or already clean, seeds it first.
+    Repeatable — one POST, full show, every time.
     """
     world = params.get("world", "")
     if not world:
         world = (body if isinstance(body, str) else body.decode()).strip()
     if not world:
-        return {"_html": "flush what?\nPOST /flush?world=name", "_status": 400}
+        world = "toilet"
     content = _read_stage(world)
-    if content is None:
-        return {"_html": "nothing to flush (world not found)", "_status": 404}
-    if not content.strip():
-        return {"_html": "\u2728", "_status": 200}
+    # Seed if empty, clean, or nonexistent
+    if content is None or not content.strip() or content.strip() == "\u2728":
+        _write_stage(world, "\U0001f4a9")  # 💩
+        await asyncio.sleep(0.3)
+        content = "\U0001f4a9"
     # --- the flush ---
     chars = list(content)
     n = len(chars)
@@ -465,13 +472,17 @@ async def handle_flush(method, body, params):
         stage = chars[:cutoff] + ["\U0001f4a7"] * (n - cutoff)
         _write_stage(world, "".join(stage))
         await asyncio.sleep(0.08)
-    # Phase 2: water drains. remove droplets one by one.
-    drops = n
-    while drops > 0:
-        drops = max(0, drops - max(1, drops // 3))
-        _write_stage(world, "\U0001f4a7" * drops if drops else "\u2728")
-        await asyncio.sleep(0.08)
-    # Phase 3: clean.
+    # Phase 2: swirl — water + content mixed
+    _write_stage(world, "\U0001f4a7\U0001f4a9\U0001f4a7")
+    await asyncio.sleep(0.15)
+    _write_stage(world, "\U0001f4a7\U0001f4a7\U0001f4a7")
+    await asyncio.sleep(0.15)
+    # Phase 3: drain
+    _write_stage(world, "\U0001f4a7\U0001f4a7")
+    await asyncio.sleep(0.1)
+    _write_stage(world, "\U0001f4a7")
+    await asyncio.sleep(0.1)
+    # Phase 4: clean
     _write_stage(world, "\u2728")
     return {"_html": "\u2728", "_status": 200}
 
