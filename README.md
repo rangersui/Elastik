@@ -16,27 +16,37 @@ Works on anything with Python 3.8+: laptop, Raspberry Pi, iOS (a-Shell), Android
 AI writes a string. Browser renders it. You see something.
 
 ```
-POST /work/write    body: <h1>hello</h1>    → stored in SQLite
-GET  /work/read                              → {"stage_html":"<h1>hello</h1>","version":1}
-GET  /work                                   → browser renders it in an iframe
+POST /home/work/write    body: <h1>hello</h1>    → stored in SQLite
+GET  /home/work/read                              → {"stage_html":"<h1>hello</h1>","version":1}
+GET  /home/work                                   → browser renders it in an iframe
 ```
 
-Every path is a world. Writing to a new path creates it.
+Every path is a world. Writing to a new path creates it. FHS layout:
+
+```
+/home/{name}/*    user worlds       (your content)
+/etc/{name}/*     config worlds     (cdn, endpoints, etc.)
+/usr/lib/skills/* auto-synced skill docs
+/var/log/*        system logs       (health, sync)
+/proc/worlds      list all worlds
+/proc/status      pid, uptime, version
+/dav/             WebDAV mount      (mount it, use native Unix tools)
+```
 
 ## API
 
 ```
-GET    /{name}/read     read content + version
-GET    /{name}/raw      raw bytes with correct Content-Type
-POST   /{name}/write    overwrite content (version++)
-POST   /{name}/append   append to content (version++)
-DELETE /{name}          delete world (approve token required)
-GET    /stages          list all worlds
+GET    /home/{name}/read     read content + version
+GET    /home/{name}/raw      raw bytes with correct Content-Type
+POST   /home/{name}/write    overwrite content (version++)
+POST   /home/{name}/append   append to content (version++)
+DELETE /home/{name}          delete world (approve token required)
+GET    /proc/worlds          list all worlds
 ```
 
-Polling: `GET /{name}/read?v=3` → returns 304 if version unchanged.
+Polling: `GET /home/{name}/read?v=3` → returns 304 if version unchanged.
 
-Binary: `POST /{name}/write?ext=png` with raw bytes. `GET /{name}/raw` serves it back as `image/png`.
+Binary: `POST /home/{name}/write?ext=png` with raw bytes. `GET /home/{name}/raw` serves it back as `image/png`.
 
 ## Auth
 
@@ -138,7 +148,7 @@ Different keys. Not "shouldn't." **Can't.**
 ## Connect AI
 
 ```bash
-curl -X POST http://localhost:3005/work/write \
+curl -X POST http://localhost:3005/home/work/write \
   -H "Authorization: Bearer $TOKEN" \
   -d '<h1>hello world</h1>'
 ```
