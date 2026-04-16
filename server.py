@@ -247,8 +247,9 @@ async def recv(receive):
         if not m.get("more_body"): return b
 
 async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
-    body = data.encode() if isinstance(data, str) else data
-    h = [[b"content-type", ct.encode()], [b"content-length", str(len(body)).encode()]]
+    body = data.encode("utf-8") if isinstance(data, str) else data
+    _ct = ct if "charset" in ct else (ct + "; charset=utf-8" if "/" in ct else ct)
+    h = [[b"content-type", _ct.encode()], [b"content-length", str(len(body)).encode()]]
     if csp: h.append([b"content-security-policy", _csp().encode()])
     if extra_headers: h.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": h})
@@ -373,7 +374,7 @@ async def app(scope, receive, send):
                 doc = handler.__doc__.strip()
                 route = base_path_override or matched
                 # Build a simple form from the docstring
-                _man = (f'<div style="font:14px/1.6 system-ui;max-width:700px;margin:2em auto;padding:0 1em">'
+                _man = (f'<meta charset="utf-8"><div style="font:14px/1.6 system-ui;max-width:700px;margin:2em auto;padding:0 1em">'
                         f'<h2 style="margin:0 0 .5em">{route}</h2>'
                         f'<pre style="white-space:pre-wrap;background:#f5f5f5;padding:1em;border-radius:4px">{doc}</pre>'
                         f'<form method="GET" action="{route}" style="margin-top:1em">'
