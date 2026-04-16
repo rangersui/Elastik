@@ -737,7 +737,7 @@ async def handle_trail(method, body, params):
     return {"_html": "\n".join(steps) + "\n" if steps else "(no trail yet)\n", "_status": 200}
 
 
-_HUNT_SKIP_PREFIXES = ("etc/", "usr/", "var/", "sys-", "plugin-", ".")
+_HUNT_SKIP_PREFIXES = ("etc/", "usr/", "var/", "boot/", "sys-", "plugin-", ".")
 
 async def handle_hunt(method, body, params):
     """/hunt — random encounter. You don't browse. You stumble in.

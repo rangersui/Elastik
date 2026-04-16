@@ -429,7 +429,7 @@ async def app(scope, receive, send):
     # /etc/ and /usr/ keep their prefixes in the world name (system worlds
     # namespaced on disk).
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr", "var") and parts[-1] in _ACTIONS:
+    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr", "var", "boot") and parts[-1] in _ACTIONS:
         action = parts[-1]
         if parts[0] == "home":
             name = "/".join(parts[1:-1])
@@ -441,16 +441,17 @@ async def app(scope, receive, send):
             return await send_r(send, 405, '{"error":"method not allowed"}')
         # Write auth: token for mutations, approve for system worlds (/etc/, /usr/)
         if action in ("write", "append", "pending"):
-            if name.startswith(("etc/", "usr/", "var/")):
+            if name.startswith(("etc/", "usr/", "var/", "boot/")):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
-        # Read auth: /etc/shadow is chmod 000 except to root (T3). Everyone
-        # else would only see sha256 hashes, but even that leaks who exists.
-        if action in ("read", "raw") and name == "etc/shadow":
+        # Read auth: sensitive paths need T3.
+        # /etc/shadow — hashes leak who exists.
+        # /boot/* — contains tokens, port, plugin list. Read once at boot.
+        if action in ("read", "raw") and (name == "etc/shadow" or name.startswith("boot/")):
             if _check_auth(scope) != "approve":
-                return await send_r(send, 403, '{"error":"shadow is chmod 000"}')
+                return await send_r(send, 403, '{"error":"read requires approve"}')
         # CSRF gate: browser-only actions check Origin (physics, not policy)
         if action in ("sync", "result", "clear"):
             origin = ""
@@ -704,6 +705,26 @@ if __name__ == "__main__":
         _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")
         _sync_dir("renderers", "renderer-*.html",
                   lambda f: f"usr/lib/renderer/{f.stem[9:]}", "renderers")  # strip "renderer-"
+    # /boot — write once at startup, read requires T3.
+    # boot/env: which env vars are set (names + non-secret values).
+    # boot/grub: which plugins loaded.
+    _boot_env = []
+    _secret_keys = {"ELASTIK_TOKEN", "ELASTIK_APPROVE_TOKEN", "ELASTIK_KEY",
+                    "ELASTIK_MCP_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                    "DEEPSEEK_API_KEY", "GOOGLE_API_KEY"}
+    for k, v in sorted(os.environ.items()):
+        if k.startswith("ELASTIK_") or k.startswith("OLLAMA_"):
+            _boot_env.append(f"{k}={'***' if k in _secret_keys else v}")
+    c = conn("boot/env")
+    c.execute("UPDATE stage_meta SET stage_html=?,ext='txt',version=version+1,"
+              "updated_at=datetime('now') WHERE id=1", ("\n".join(_boot_env),))
+    c.commit()
+    _boot_grub = [m["name"] for m in _plugin_meta]
+    c = conn("boot/grub")
+    c.execute("UPDATE stage_meta SET stage_html=?,ext='txt',version=version+1,"
+              "updated_at=datetime('now') WHERE id=1", ("\n".join(_boot_grub),))
+    c.commit()
+    if plugins:
         print(f"\n  elastik -> http://{HOST}:{PORT}\n")
         run(extra_tasks=[plugins.cron_loop()])
     else:
