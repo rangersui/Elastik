@@ -1,25 +1,32 @@
 """browser — Chrome remote control via CDP. Zero MCP, zero npm.
 
 POST /opt/browser/open?url=https://...   launch Chrome + navigate
-POST /opt/browser/eval                   Runtime.evaluate (body = JS)
 GET  /opt/browser/screenshot             PNG base64
+GET  /opt/browser/extract?s=h1           text by CSS selector
 POST /opt/browser/click?x=100&y=200      click
 POST /opt/browser/type                   type text (body)
-GET  /opt/browser/dom                    full page text
+POST /opt/browser/scroll?y=500           scroll
+POST /opt/browser/back                   history back
 POST /opt/browser/close                  kill Chrome
 
+No /eval. The verb doesn't exist in this universe.
+AI sees pages, reads text, clicks buttons. It cannot run arbitrary JS.
+Each verb has a bounded blast radius.
+
+Chrome launches incognito — no cookies, no logins, no sessions.
+Even on a hostile page, there's nothing to steal.
+
 Chrome DevTools Protocol over WebSocket. No Puppeteer. No Playwright.
-No MCP. Just the 20-year-old debugging port that Selenium, Puppeteer,
-and every browser automation tool secretly calls underneath.
+No MCP. Just the 20-year-old debugging port.
 """
-DESCRIPTION = "/opt/browser — Chrome via CDP. Screenshot, eval, click."
+DESCRIPTION = "/opt/browser — Chrome via CDP. See, read, click. No eval."
 AUTH = "approve"  # browser control is root-only
 ROUTES = {}
 
 import asyncio, base64, json, os, platform, secrets, socket, struct, subprocess, threading
 import urllib.request
 
-# ── CDP WebSocket client — stdlib only, ~50 lines ────────────────────
+# ── CDP WebSocket client — stdlib only ───────────────────────────────
 
 class CDP:
     def __init__(self, ws_url):
@@ -38,7 +45,7 @@ class CDP:
             buf += self.sock.recv(4096)
         if b"101" not in buf.split(b"\r\n")[0]:
             raise ConnectionError(f"WS handshake failed: {buf[:80]}")
-        self.sock.settimeout(30)  # screenshots can be big
+        self.sock.settimeout(30)
         self._id = 0
         self._lock = threading.Lock()
 
@@ -48,7 +55,6 @@ class CDP:
             mid = self._id
             msg = json.dumps({"id": mid, "method": method, "params": params or {}}).encode()
             self._ws_send(msg)
-            # recv until we get OUR response (skip CDP events)
             while True:
                 r = self._recv_frame()
                 if r.get("id") == mid:
@@ -71,7 +77,6 @@ class CDP:
         self.sock.sendall(frame)
 
     def _recv_frame(self):
-        """Read one logical message. Handles continuation frames (fragmentation)."""
         buf = b""
         while True:
             h = self._readn(2)
@@ -82,7 +87,7 @@ class CDP:
             elif n == 127:
                 n = struct.unpack(">Q", self._readn(8))[0]
             if h[1] & 0x80:
-                self._readn(4)  # server shouldn't mask, but tolerate
+                self._readn(4)
             buf += self._readn(n)
             if fin:
                 break
@@ -102,6 +107,28 @@ class CDP:
             self.sock.close()
         except Exception:
             pass
+
+    def _extract(self, selector):
+        """Get text content of elements matching a CSS selector.
+        Uses DOM.querySelectorAll — not eval. Bounded."""
+        # Get document root
+        doc = self.send("DOM.getDocument", {"depth": 0})
+        root_id = doc.get("root", {}).get("nodeId", 0)
+        if not root_id:
+            return []
+        # Query
+        nodes = self.send("DOM.querySelectorAll", {"nodeId": root_id, "selector": selector})
+        node_ids = nodes.get("nodeIds", [])
+        results = []
+        for nid in node_ids[:50]:  # cap at 50 results
+            outer = self.send("DOM.getOuterHTML", {"nodeId": nid})
+            html = outer.get("outerHTML", "")
+            # Strip tags for plain text
+            import re
+            text = re.sub(r"<[^>]+>", "", html).strip()
+            if text:
+                results.append(text)
+        return results
 
 
 # ── Chrome launcher ──────────────────────────────────────────────────
@@ -139,7 +166,7 @@ def _find_chrome():
 # ── Handlers ─────────────────────────────────────────────────────────
 
 async def handle_open(method, body, params):
-    """POST /opt/browser/open?url=... — launch Chrome, connect CDP, navigate."""
+    """POST /opt/browser/open?url=... — launch incognito Chrome, connect CDP, navigate."""
     global _proc, _cdp
     if not _proc or _proc.poll() is not None:
         chrome = _find_chrome()
@@ -149,6 +176,7 @@ async def handle_open(method, body, params):
             chrome, f"--remote-debugging-port={_CDP_PORT}",
             f"--user-data-dir={tmpdir}",
             "--no-first-run", "--no-default-browser-check",
+            "--incognito",  # no cookies, no sessions, nothing to steal
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(30):
             try:
@@ -156,7 +184,6 @@ async def handle_open(method, body, params):
                     f"http://127.0.0.1:{_CDP_PORT}/json", timeout=1).read())
                 page = next((t for t in targets if t.get("type") == "page"), None)
                 if not page:
-                    # no page tab — create one
                     urllib.request.urlopen(f"http://127.0.0.1:{_CDP_PORT}/json/new")
                     await asyncio.sleep(0.5)
                     targets = json.loads(urllib.request.urlopen(
@@ -164,6 +191,7 @@ async def handle_open(method, body, params):
                     page = next((t for t in targets if t.get("type") == "page"), targets[0])
                 _cdp = CDP(page["webSocketDebuggerUrl"])
                 _cdp.send("Page.enable")
+                _cdp.send("DOM.enable")
                 break
             except Exception:
                 await asyncio.sleep(0.3)
@@ -178,18 +206,6 @@ async def handle_open(method, body, params):
     return {"ok": True, "url": url}
 
 
-async def handle_eval(method, body, params):
-    """POST /opt/browser/eval — execute JS in page, return result."""
-    if not _cdp:
-        return {"error": "no browser. POST /opt/browser/open first", "_status": 400}
-    code = body if isinstance(body, str) else body.decode()
-    r = _cdp.send("Runtime.evaluate", {"expression": code, "returnByValue": True})
-    if "error" in r:
-        return {"error": r["error"], "_status": 500}
-    val = r.get("result", {}).get("value", "")
-    return {"_html": str(val) if val is not None else "", "_status": 200}
-
-
 async def handle_screenshot(method, body, params):
     """GET /opt/browser/screenshot — PNG as base64 data URI."""
     if not _cdp:
@@ -198,6 +214,18 @@ async def handle_screenshot(method, body, params):
     if "error" in r:
         return {"error": r["error"], "_status": 500}
     return {"_html": "data:image/png;base64," + r["data"], "_status": 200}
+
+
+async def handle_extract(method, body, params):
+    """GET /opt/browser/extract?s=h1 — text content of elements matching CSS selector.
+    Not eval. DOM.querySelectorAll. Bounded to 50 results."""
+    if not _cdp:
+        return {"error": "no browser", "_status": 400}
+    selector = params.get("s", "") or params.get("selector", "") or "body"
+    results = _cdp._extract(selector)
+    if len(results) == 1:
+        return {"_html": results[0], "_status": 200}
+    return {"results": results, "count": len(results)}
 
 
 async def handle_click(method, body, params):
@@ -221,14 +249,28 @@ async def handle_type(method, body, params):
     return {"ok": True, "typed": len(text)}
 
 
-async def handle_dom(method, body, params):
-    """GET /opt/browser/dom — page innerText, plain."""
+async def handle_scroll(method, body, params):
+    """POST /opt/browser/scroll?y=500 — scroll page."""
     if not _cdp:
         return {"error": "no browser", "_status": 400}
-    r = _cdp.send("Runtime.evaluate",
-                   {"expression": "document.body.innerText", "returnByValue": True})
-    val = r.get("result", {}).get("value", "")
-    return {"_html": str(val) if val else "", "_status": 200}
+    x = float(params.get("x", 0))
+    y = float(params.get("y", 300))
+    _cdp.send("Input.dispatchMouseEvent",
+              {"type": "mouseWheel", "x": 100, "y": 100,
+               "deltaX": x, "deltaY": y})
+    return {"ok": True}
+
+
+async def handle_back(method, body, params):
+    """POST /opt/browser/back — history back."""
+    if not _cdp:
+        return {"error": "no browser", "_status": 400}
+    history = _cdp.send("Page.getNavigationHistory")
+    idx = history.get("currentIndex", 0)
+    if idx > 0:
+        entries = history.get("entries", [])
+        _cdp.send("Page.navigateToHistoryEntry", {"entryId": entries[idx - 1]["id"]})
+    return {"ok": True}
 
 
 async def handle_close(method, body, params):
@@ -245,10 +287,11 @@ async def handle_close(method, body, params):
 
 ROUTES = {
     "/opt/browser/open": handle_open,
-    "/opt/browser/eval": handle_eval,
     "/opt/browser/screenshot": handle_screenshot,
+    "/opt/browser/extract": handle_extract,
     "/opt/browser/click": handle_click,
     "/opt/browser/type": handle_type,
-    "/opt/browser/dom": handle_dom,
+    "/opt/browser/scroll": handle_scroll,
+    "/opt/browser/back": handle_back,
     "/opt/browser/close": handle_close,
 }
