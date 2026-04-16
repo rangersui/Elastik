@@ -8,7 +8,7 @@ import server
 # DAV URL → world name mirrors the HTTP scheme: /dav/home/foo ↔ /home/foo/read.
 # Worlds with these prefixes are system worlds; /home/ is the user namespace
 # and gets stripped on the wire (world "foo" is displayed at /dav/home/foo).
-_SYS_PREFIXES = ("etc/", "usr/", "var/", "tmp/", "mnt/")
+_SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
 
 def _ext(typ):
     if typ == "html": return ".html.txt"  # file:// has no sandbox
