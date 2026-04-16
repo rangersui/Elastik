@@ -364,6 +364,22 @@ async def app(scope, receive, send):
         b = body_raw.decode("utf-8", "replace")
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        # Man page: browser GET, no query params, handler has docstring → show form
+        if method == "GET" and not qs:
+            accept = ""
+            for k, v in scope.get("headers", []):
+                if k == b"accept": accept = v.decode(); break
+            if accept.startswith("text/html") and callable(handler) and handler.__doc__:
+                doc = handler.__doc__.strip()
+                route = base_path_override or matched
+                # Build a simple form from the docstring
+                _man = (f'<div style="font:14px/1.6 system-ui;max-width:700px;margin:2em auto;padding:0 1em">'
+                        f'<h2 style="margin:0 0 .5em">{route}</h2>'
+                        f'<pre style="white-space:pre-wrap;background:#f5f5f5;padding:1em;border-radius:4px">{doc}</pre>'
+                        f'<form method="GET" action="{route}" style="margin-top:1em">'
+                        f'<input name="q" placeholder="query..." style="font:14px monospace;padding:6px;width:60%">'
+                        f' <button style="padding:6px 12px">execute</button></form></div>')
+                return await send_r(send, 200, _man, "text/html")
         params["_scope"] = scope
         params["_body_raw"] = body_raw  # raw bytes for binary plugins (dav PUT)
         params["_send"] = send          # raw send for plugins that stream (SSE)

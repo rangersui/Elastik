@@ -1,6 +1,6 @@
 <!DOCTYPE html><html><head><link rel="manifest" href="/manifest.json"><link rel="search" type="application/opensearchdescription+xml" title="elastik" href="/opensearch.xml"></head><body style="margin:0"><script>
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');
-let p=location.pathname.slice(1);const _fhs=['home/','etc/','usr/','var/','boot/'];if(p&&!_fhs.some(f=>p.startsWith(f)))p='home/'+p;const w=p.startsWith('home/')?p.slice(5):p;const o=location.origin;
+let p=location.pathname.slice(1);const _fhs=['home/','etc/','usr/','var/','boot/','mnt/'];if(p&&!_fhs.some(f=>p.startsWith(f)))p='home/'+p;const w=p.startsWith('home/')?p.slice(5):p;const o=location.origin;
 if(!p){fetch('/proc/worlds').then(r=>r.json()).then(d=>{const _sp=['etc/','usr/','var/','boot/'];
 function buildTree(items,makeHref){const root={};items.forEach(s=>{const parts=s.name.split('/');let node=root;for(let i=0;i<parts.length-1;i++){const k=parts[i];if(!node[k])node[k]={_sub:{}};else if(!node[k]._sub){const o=node[k];node[k]={_sub:{},_href:o._href,_v:o._v}}node=node[k]._sub}const leaf=parts[parts.length-1];if(node[leaf]&&node[leaf]._sub){node[leaf]._href=makeHref(s);node[leaf]._v=s.version}else{node[leaf]={_href:makeHref(s),_v:s.version}}});return root}
 function renderTree(tree,indent){let h='';const dirs=[],files=[];for(const k of Object.keys(tree).sort()){if(tree[k]._sub)dirs.push(k);else files.push(k)}
