@@ -21,7 +21,7 @@ def _check_write_auth(scope):
 
 def _world_name(path):
     """/dav/home/foo.png → 'foo'; /dav/etc/cdn → 'etc/cdn'; /dav/foo → 'foo' (legacy)."""
-    rest = path[4:].lstrip("/")  # strip /dav
+    rest = path[4:].lstrip("/").rstrip("/")  # strip /dav + trailing slash
     if rest.startswith("home/"): rest = rest[5:]  # home/ is URL-only sugar
     elif rest == "home": rest = ""                # /dav/home/ itself is the user root
     if not rest: return ""

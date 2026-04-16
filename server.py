@@ -580,6 +580,9 @@ async def app(scope, receive, send):
         # Sensitive-read gate moved into the GET handler below (after
         # browser detection). Browser navigations always get index.html;
         # the iframe's own fetch hits the gate separately.
+        # ── GET on internal ops → 405 ──
+        if method == "GET" and iop:
+            return await send_r(send, 405, '{"error":"method not allowed"}')
         # ── GET: read / raw / browser ──
         if method == "GET":
             # Content negotiation: browser gets index.html, API gets JSON
