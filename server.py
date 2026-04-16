@@ -556,8 +556,23 @@ async def app(scope, receive, send):
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         # ── Auth gates ──
-        if method in ("PUT", "POST") and iop not in ("sync",):
-            if name.startswith(("etc/", "usr/", "var/", "boot/")):
+        if method in ("PUT", "POST"):
+            if iop:
+                # Internal ops (sync/pending/result/clear): need auth OR same-origin.
+                # Browser iframe is same-origin (sends Origin header). curl without
+                # auth AND without Origin = blocked. Closes the sync bypass.
+                if method != "POST":
+                    return await send_r(send, 405, '{"error":"method not allowed"}')
+                origin = ""
+                for k, v in scope.get("headers", []):
+                    if k == b"origin": origin = v.decode(); break
+                is_local = origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]"))
+                has_auth = _check_auth(scope) is not None
+                if origin and not is_local:
+                    return await send_r(send, 403, '{"error":"cross-origin rejected"}')
+                if not has_auth and not is_local:
+                    return await send_r(send, 403, '{"error":"unauthorized"}')
+            elif name.startswith(("etc/", "usr/", "var/", "boot/")):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
@@ -565,15 +580,6 @@ async def app(scope, receive, send):
         # Sensitive-read gate moved into the GET handler below (after
         # browser detection). Browser navigations always get index.html;
         # the iframe's own fetch hits the gate separately.
-        # ── CSRF for internal ops ──
-        if iop:
-            if method != "POST":
-                return await send_r(send, 405, '{"error":"method not allowed"}')
-            origin = ""
-            for k, v in scope.get("headers", []):
-                if k == b"origin": origin = v.decode(); break
-            if origin and not origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]")):
-                return await send_r(send, 403, '{"error":"cross-origin rejected"}')
         # ── GET: read / raw / browser ──
         if method == "GET":
             # Content negotiation: browser gets index.html, API gets JSON
@@ -834,12 +840,12 @@ if __name__ == "__main__":
     # boot/env: which env vars are set (names + non-secret values).
     # boot/grub: which plugins loaded.
     _boot_env = []
-    _secret_keys = {"ELASTIK_TOKEN", "ELASTIK_APPROVE_TOKEN", "ELASTIK_KEY",
-                    "ELASTIK_MCP_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-                    "DEEPSEEK_API_KEY", "GOOGLE_API_KEY"}
+    # Allowlist: only show values for these safe keys. Everything else → name only.
+    _safe_values = {"ELASTIK_HOST", "ELASTIK_PORT", "ELASTIK_PUBLIC",
+                    "ELASTIK_DATA", "ELASTIK_ROOT", "OLLAMA_URL", "OLLAMA_MODEL"}
     for k, v in sorted(os.environ.items()):
         if k.startswith("ELASTIK_") or k.startswith("OLLAMA_"):
-            _boot_env.append(f"{k}={'***' if k in _secret_keys else v}")
+            _boot_env.append(f"{k}={v}" if k in _safe_values else f"{k}=***")
     c = conn("boot/env")
     c.execute("UPDATE stage_meta SET stage_html=?,ext='txt',version=version+1,"
               "updated_at=datetime('now') WHERE id=1", ("\n".join(_boot_env),))

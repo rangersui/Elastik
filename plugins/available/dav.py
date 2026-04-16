@@ -176,8 +176,8 @@ async def handle(method, body, params):
             return {"_html": listing}
         if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
-        if name == "etc/shadow" and server._check_auth(scope) != "approve":
-            return {"error":"shadow is chmod 000", "_status":403}
+        if (name == "etc/shadow" or name.startswith("boot/")) and server._check_auth(scope) != "approve":
+            return {"error":"read requires approve", "_status":403}
         raw, _ = _read(name)
         return {"_body":raw, "_ct":"text/plain"}
 
