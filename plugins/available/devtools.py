@@ -433,7 +433,13 @@ async def handle_fuse(method, body, params):
 def _write_stage(world, content):
     """Write to a world, bump version. SSE viewers see it live."""
     db = _DATA / _disk_name(world) / "universe.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(db))
+    c.execute("CREATE TABLE IF NOT EXISTS stage_meta("
+              "id INTEGER PRIMARY KEY CHECK(id=1),stage_html TEXT DEFAULT '',"
+              "pending_js TEXT DEFAULT '',js_result TEXT DEFAULT '',"
+              "version INTEGER DEFAULT 0,updated_at TEXT DEFAULT '',ext TEXT DEFAULT 'html')")
+    c.execute("INSERT OR IGNORE INTO stage_meta(id) VALUES(1)")
     c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,"
               "updated_at=datetime('now') WHERE id=1", (content,))
     c.commit(); c.close()
