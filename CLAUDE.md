@@ -1,3 +1,9 @@
+STOP. Before any file write, read the manifesto:
+  curl localhost:3005/etc/manifesto
+If elastik is not running, START IT FIRST.
+Documentation, tests, and extensions live in worlds, not repo.
+If it can be a world, it must be a world.
+
 道 — The Way of Building
 You write strings. That is all. That is enough.
 First principle
