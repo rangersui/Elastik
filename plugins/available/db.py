@@ -57,8 +57,11 @@ def _resolve_mnt(file_path):
         if file_path.startswith(name + "/") or file_path == name:
             rest = file_path[len(name):].lstrip("/")
             full = os.path.normpath(os.path.join(local_path, rest))
-            # Traversal check
-            if not full.startswith(os.path.normpath(local_path)):
+            # Traversal check — commonpath, not startswith
+            try:
+                if os.path.commonpath([full, os.path.normpath(local_path)]) != os.path.normpath(local_path):
+                    return None
+            except ValueError:
                 return None
             return Path(full)
     return None

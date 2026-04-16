@@ -248,7 +248,7 @@ async def recv(receive):
 
 async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
     body = data.encode("utf-8") if isinstance(data, str) else data
-    _ct = ct if "charset" in ct else (ct + "; charset=utf-8" if "/" in ct else ct)
+    _ct = ct if "charset" in ct or ct.startswith(("image/", "audio/", "video/", "application/octet")) else (ct + "; charset=utf-8" if "/" in ct else ct)
     h = [[b"content-type", _ct.encode()], [b"content-length", str(len(body)).encode()]]
     if csp: h.append([b"content-security-policy", _csp().encode()])
     if extra_headers: h.extend(extra_headers)
@@ -522,7 +522,7 @@ async def app(scope, receive, send):
             ls_prefix = "/".join(parts[1:])  # "home" → "", "home/photos" → "photos"
             # Only show non-system worlds
             entries = [(n, d) for n, d in _ls(ls_prefix)
-                       if not any(n.startswith(p) for p in ("etc/","usr/","var/","boot/"))]
+                       if n not in ("etc","usr","var","boot")]
         else:
             ls_prefix = "/".join(parts)  # "etc" → "etc", "usr/lib" → "usr/lib"
             entries = _ls(ls_prefix)

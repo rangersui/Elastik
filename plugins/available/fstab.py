@@ -71,8 +71,12 @@ def _safe_resolve(root, rel):
         if part == "..":
             return None, "traversal denied"
     full = os.path.normpath(os.path.join(root, rel))
-    # must stay under root
-    if not full.startswith(os.path.normpath(root)):
+    # must stay under root — use commonpath, not startswith
+    # (startswith "/mnt/root" would accept "/mnt/root_evil/...")
+    try:
+        if os.path.commonpath([full, os.path.normpath(root)]) != os.path.normpath(root):
+            return None, "traversal denied"
+    except ValueError:
         return None, "traversal denied"
     return full, None
 
