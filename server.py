@@ -297,8 +297,30 @@ async def app(scope, receive, send):
     # (auth gate moved to top of app — see above)
     parts = [p for p in path.split("/") if p]
 
+    # /bin/* → alias for plugin routes. /bin/grep = /grep. FHS executable namespace.
+    # GET /bin → list all plugin routes (like `ls /bin`).
+    if path == "/bin" and method == "GET":
+        # ls /bin — every plugin route with one-line description
+        bins = []
+        for route in sorted(_plugins.keys()):
+            doc = ""
+            h = _plugins[route]
+            if callable(h) and h.__doc__:
+                doc = h.__doc__.strip().split("\n")[0].strip()
+            bins.append({"route": route, "description": doc})
+        accept = ""
+        for k, v in scope.get("headers", []):
+            if k == b"accept": accept = v.decode(); break
+        if accept.startswith("text/html"):
+            return await send_r(send, 200, INDEX, "text/html", csp=True)
+        return await send_r(send, 200, json.dumps(bins))
+    if path.startswith("/bin/"):
+        path = path[4:]  # /bin/grep → /grep
+        base_path_override = path.split("?")[0]
+    else:
+        base_path_override = None
     # Plugin dispatch — exact or prefix match, server gates auth centrally.
-    base_path = path.split("?")[0]
+    base_path = base_path_override or path.split("?")[0]
     handler, matched = _match_plugin(base_path)
     if handler:
         level = _plugin_auth.get(matched, "none")
