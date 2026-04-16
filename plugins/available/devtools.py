@@ -206,7 +206,7 @@ async def handle_whoami(method, body, params):
 
 
 async def handle_uuid(method, body, params):
-    """uuid — cryptographic randomness. One per call."""
+    """/uuid?n=5 — cryptographic randomness. One per call, or n at once."""
     import uuid
     n = min(int(params.get("n", "1")), 100)
     if n == 1:
@@ -243,7 +243,7 @@ async def handle_delay(method, body, params):
 
 
 async def handle_bench(method, body, params):
-    """bench — micro-benchmark. Measures sqlite read + JSON round-trip."""
+    """/bench?n=100 — micro-benchmark. Measures sqlite read + JSON round-trip."""
     iterations = min(int(params.get("n", "100")), 1000)
     names = _world_names()
     t0 = time.time()
@@ -388,7 +388,7 @@ async def handle_inductor(method, body, params):
 
 
 async def handle_diode(method, body, params):
-    """/diode — one-way gate. forward voltage ~0.7V."""
+    """/diode?vf=0.7 — one-way gate. forward voltage ~0.7V."""
     return {"type": "D", "forward_v": _num(params.get("vf"), 0.7)}
 
 
@@ -401,14 +401,14 @@ async def handle_led(method, body, params):
 
 
 async def handle_transistor(method, body, params):
-    """/transistor?type=npn — bipolar junction. npn or pnp."""
+    """/transistor?type=npn&hfe=100 — bipolar junction. npn or pnp."""
     config = params.get("type", "npn").lower()
     if config not in ("npn", "pnp"): config = "npn"
     return {"type": "BJT", "config": config, "hfe": int(_num(params.get("hfe"), 100))}
 
 
 async def handle_mosfet(method, body, params):
-    """/mosfet?type=n — field-effect. n-channel or p-channel."""
+    """/mosfet?type=n&vgs_th=2.0 — field-effect. n-channel or p-channel."""
     config = params.get("type", "n").lower()
     if config not in ("n", "p"): config = "n"
     return {"type": "MOSFET", "channel": config,
@@ -416,7 +416,7 @@ async def handle_mosfet(method, body, params):
 
 
 async def handle_relay(method, body, params):
-    """/relay?coil=24 — electromechanical switch. coil voltage + contact rating."""
+    """/relay?coil=24&contact=70 — electromechanical switch. coil voltage + contact rating."""
     return {"type": "RELAY",
             "coil_v": _num(params.get("coil"), 24),
             "contact_a": _num(params.get("contact"), 70)}
@@ -500,7 +500,7 @@ _COW = r"""
 
 
 async def handle_cowsay(method, body, params):
-    """cowsay — if the cow renders intact, your encoding is fine."""
+    """/cowsay?say=hello — if the cow renders intact, your encoding is fine."""
     text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "moo"
     n = max(len(text), 2)
     cow = _COW.format(msg=text.ljust(n), border="-" * (n + 2))
@@ -524,7 +524,7 @@ _MOAI = """
 
 
 async def handle_moaisay(method, body, params):
-    """moaisay — because cowsay is too cheerful."""
+    """/moaisay?say=hello — because cowsay is too cheerful."""
     text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "🗿"
     n = max(len(text), 2)
     moai = _MOAI.format(msg=text.ljust(n), border="─" * (n + 2))
@@ -534,7 +534,7 @@ _STONE_LOG = _DATA / "dev_stone.log"
 
 
 async def handle_stone_dev(method, body, params):
-    """/dev/stone — receives, remembers, never replies.
+    """/dev/stone?say=text — receives, remembers, never replies.
     Not /dev/null. Input is preserved, but there is no read path.
     Petrification, not discard. The stone's signature is the full sha256.
     """
@@ -602,7 +602,7 @@ async def handle_stone_weight(method, body, params):
 _ASH_LOG = _DATA / "dev_ash.log"
 
 async def handle_fire(method, body, params):
-    """/dev/fire — burns on contact. Content consumed. Hash → /ash.
+    """/dev/fire?say=text — burns on contact. Content consumed. Hash → /ash.
     Fire and ash are one event seen from two sides: the warmth that
     leaves, and the residue that doesn't quite. You cannot get the
     content back from /ash — only proof that something once was.
@@ -644,7 +644,7 @@ async def handle_ash(method, body, params):
 _WALL_LOG = _DATA / "dev_wall.log"
 
 async def handle_wall(method, body, params):
-    """/wall — cave painting. Append-only public record.
+    """/wall?say=text — cave painting. Append-only public record.
     Unlike stone (private hash), wall keeps the actual marks.
     POST to add, GET to read all (oldest first).
     """
@@ -671,7 +671,7 @@ async def handle_wall(method, body, params):
 _DRUM_LISTENERS = []  # in-memory list of asyncio.Queue
 
 async def handle_drum(method, body, params):
-    """/drum — beat once, heard by all CURRENT listeners. No replay.
+    """/drum?say=beat — beat once, heard by all CURRENT listeners. No replay.
     POST = beat. GET = listen (SSE stream of beats).
     If you weren't listening when the drum was beaten, you missed it.
     This is the original push notification.
@@ -715,7 +715,7 @@ async def handle_drum(method, body, params):
 _TRAIL_LOG = _DATA / "dev_trail.log"
 
 async def handle_trail(method, body, params):
-    """/trail — breadcrumbs. Each POST adds a step. GET shows the path.
+    """/trail?say=step — breadcrumbs. Each POST adds a step. GET shows the path.
     No rewind, no delete. You can see where you've been — not go back.
     """
     if method == "POST":
@@ -824,7 +824,7 @@ _BONES_SIGNS = ["great blessing", "blessing", "small blessing", "future blessing
                 "curse", "small curse", "future curse", "great curse"]
 
 async def handle_bones(method, body, params):
-    """/bones — SHA-256 divination. Throw the oracle bone into the fire.
+    """/bones?q=question — SHA-256 divination. Throw the oracle bone into the fire.
     POST your question. Receive an omen based on the hash.
     Pure physical entropy — no LLM, no training, no bias. Just the bone.
     """
@@ -973,7 +973,7 @@ async def handle_river(method, body, params):
 _KNOT_LOG = _DATA / "dev_knot.txt"
 
 async def handle_knot(method, body, params):
-    """/knot — quipu. Records that events happened, and their magnitude.
+    """/knot?say=text — quipu. Records that events happened, and their magnitude.
     Never what they said. Anti-semantic.
 
     POST: discards content. Ties one knot in the rope, sized by byte length.
@@ -1032,7 +1032,7 @@ async def handle_shadow(method, body, params):
 _AMBER_DIR = _DATA / "amber"
 
 async def handle_amber(method, body, params):
-    """/amber — beautiful death. POST text → zlib + base64 + chmod 400.
+    """/amber?id=xxx — beautiful death. POST text → zlib + base64 + chmod 400.
     GET returns only the garbled base64. Never the original.
 
     Unlike stone (metadata of an event), amber keeps the whole corpse —
@@ -1075,7 +1075,7 @@ async def handle_amber(method, body, params):
 
 
 async def handle_narcissus(method, body, params):
-    """/narcissus — your own voice as oracle.
+    """/narcissus?q=query — your own voice as oracle.
     POST a question. Instead of reaching out to the cloud, fuzzy-match
     across ALL your local worlds (skipping system worlds like /hunt does).
     Return the forgotten passage that most echoes your query.
@@ -1178,6 +1178,7 @@ async def handle_eclipse(method, body, params):
 
 
 async def handle_proxy(method, body, params):
+    """/proxy?url=https://example.com — fetch a URL via curl."""
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
     if not url or not url.startswith(("http://", "https://")):
