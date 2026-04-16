@@ -164,7 +164,7 @@ async def _tick():
                   for ip, p in _known.items()},
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    payload = "<!--use:renderer-discovery-->\n" + json.dumps(snap)
+    payload = "<!--use:usr/lib/renderer/discovery-->\n" + json.dumps(snap)
     c = conn("discovery")
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     if old is None or old["stage_html"] != payload:

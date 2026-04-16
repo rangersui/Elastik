@@ -29,7 +29,7 @@ Setup:
 Conflict: high version wins. Last writer wins.
 Cron: auto-syncs every 5 minutes.
 Results stored in sync-log world (JSON).
-View at /sync-log with renderer-sync installed.
+View at /home/sync-log with usr/lib/renderer/sync installed.
 """
 ROUTES = {}
 CRON = 300

@@ -117,7 +117,7 @@ async def _heartbeat():
     # Write JSON to sys-health world (data only, renderer paints)
     try:
         c = conn("sys-health")
-        payload = "<!--use:renderer-health-->\n" + json.dumps(health)
+        payload = "<!--use:usr/lib/renderer/health-->\n" + json.dumps(health)
         c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",
                   (payload,))
         c.commit()

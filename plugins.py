@@ -113,10 +113,10 @@ def load_plugin(name):
         # Auto-create skills world from plugin SKILL field
         skill_doc = ns.get("SKILL", "")
         if skill_doc:
-            c = server.conn(f"skills-{name.replace('_', '-')}")
+            c = server.conn(f"usr/lib/skills/{name.replace('_', '-')}")
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
             c.commit()
-            print(f"  skill: skills-{name.replace('_', '-')}")
+            print(f"  skill: usr/lib/skills/{name.replace('_', '-')}")
         # Auto-register cron task
         if "CRON" in ns and "CRON_HANDLER" in ns:
             _cron_tasks[name] = {"interval": int(ns["CRON"]), "handler": ns["CRON_HANDLER"], "last_run": time.time()}
@@ -138,9 +138,9 @@ def unload_plugin(name):
     if name == "auth" or "auth" in meta.get("description", "").lower(): server._auth = None
     _sync_actions_remove(name, meta["routes"])
     # Auto-clear skills world
-    skill_world = f"skills-{name.replace('_', '-')}"
+    skill_world = f"usr/lib/skills/{name.replace('_', '-')}"
     try:
-        if (server.DATA / skill_world).exists():
+        if (server.DATA / server._disk_name(skill_world)).exists():
             c = server.conn(skill_world)
             c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
             c.commit()

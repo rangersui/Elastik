@@ -408,27 +408,29 @@ async def app(scope, receive, send):
         (DATA / _disk_name(name)).rename(trash)
         return await send_r(send, 200, json.dumps({"deleted": name}))
 
-    # World routes. /home/ and /etc/ are both namespaces of worlds:
-    #   /home/foo/read  →  world "foo"       →  data/foo/            (user world)
-    #   /etc/cdn/read   →  world "etc/cdn"   →  data/etc%2Fcdn/      (config world)
+    # World routes. Namespaces map to world names as follows:
+    #   /home/foo/read        →  world "foo"                  →  data/foo/              (user)
+    #   /etc/cdn/read         →  world "etc/cdn"              →  data/etc%2Fcdn/        (config)
+    #   /usr/lib/skills/s/read →  world "usr/lib/skills/s"    →  data/usr%2Flib%2F…/    (system)
     # /home/ strips its prefix (user worlds stay flat on disk, back compat).
-    # /etc/ keeps its prefix in the world name (config worlds namespaced on disk).
+    # /etc/ and /usr/ keep their prefixes in the world name (system worlds
+    # namespaced on disk).
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 3 and parts[0] in ("home", "etc") and parts[-1] in _ACTIONS:
+    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr") and parts[-1] in _ACTIONS:
         action = parts[-1]
         if parts[0] == "home":
             name = "/".join(parts[1:-1])
         else:
-            name = "etc/" + "/".join(parts[1:-1])
+            name = parts[0] + "/" + "/".join(parts[1:-1])
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         # All mutations require POST
         if action not in ("read", "raw") and method != "POST":
             return await send_r(send, 405, '{"error":"method not allowed"}')
-        # Write auth: token for mutations, approve for etc/* config worlds
+        # Write auth: token for mutations, approve for system worlds (/etc/, /usr/)
         if action in ("write", "append", "pending"):
-            if name.startswith("etc/"):
+            if name.startswith(("etc/", "usr/")):
                 if _check_auth(scope) != "approve":
-                    return await send_r(send, 403, '{"error":"etc write requires approve"}')
+                    return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
         # Read auth: /etc/shadow is chmod 000 except to root (T3). Everyone
@@ -630,6 +632,7 @@ async def _mini_serve(asgi_app, host, port):
                     await writer.drain()
             await asgi_app(scope, _recv, _send)
         except Exception:
+            import traceback; traceback.print_exc()
             try:
                 writer.write(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n")
                 await writer.drain()
@@ -685,8 +688,9 @@ if __name__ == "__main__":
     if plugins:
         plugins.load_plugins()
         plugins.register_plugin_routes()
-        _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
-        _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
+        _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")
+        _sync_dir("renderers", "renderer-*.html",
+                  lambda f: f"usr/lib/renderer/{f.stem[9:]}", "renderers")  # strip "renderer-"
         print(f"\n  elastik -> http://{HOST}:{PORT}\n")
         run(extra_tasks=[plugins.cron_loop()])
     else:

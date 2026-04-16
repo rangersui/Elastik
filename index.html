@@ -38,7 +38,7 @@ if(_helperReady&&_lastExt===t){try{f.contentWindow.postMessage({_elastik:true,_e
 _helperReady=false;
 const _plainBridge='<scr'+'ipt>window.addEventListener("message",function(e){if(e.data&&e.data._elastik_update){var pre=document.querySelector("pre");if(pre)pre.textContent=e.data._elastik_update.html||""}});parent.postMessage({_elastik:true,action:"helper_ready"},"*")</scr'+'ipt>';
 if(t==='html'){
-const um=/^<!--use:([a-zA-Z0-9_-]+)-->\n?([\s\S]*)/.exec(html);
+const um=/^<!--use:([a-zA-Z0-9_/-]+)-->\n?([\s\S]*)/.exec(html);
 if(um){try{const rr=await(await fetch('/'+um[1]+'/read')).json();if(rr.stage_html&&(rr.type||'plain')==='html'){f.srcdoc=injectHelper(rr.stage_html.replace('</head>','<script>window.__ELASTIK_DATA__='+JSON.stringify(um[2])+'<\/script></head>'));rendered=true}}catch(e){console.error('Renderer:',e)}}
 if(!rendered)f.srcdoc=injectHelper(html)}
 else{

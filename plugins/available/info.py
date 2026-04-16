@@ -10,9 +10,9 @@ async def handle_info(method, body, params):
     DATA = Path("data")
     skills = ""
     try:
-        if (DATA / "skills-core").exists():
-            skills = conn("skills-core").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-    except Exception as e: print(f"  warn: skills-core read failed: {e}")
+        if (DATA / "usr%2Flib%2Fskills%2Fcore").exists():
+            skills = conn("usr/lib/skills/core").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+    except Exception as e: print(f"  warn: usr/lib/skills/core read failed: {e}")
     # SKILLS.md removed — skills live in worlds now
     auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
     renderers, worlds = [], []
@@ -20,8 +20,8 @@ async def handle_info(method, body, params):
         for d in sorted(DATA.iterdir()):
             if d.is_dir() and (d / "universe.db").exists():
                 logical = d.name.replace("%2F", "/")
-                if logical.startswith("renderer-"): renderers.append(logical)
-                elif not logical.startswith("etc/"): worlds.append(logical)
+                if logical.startswith("usr/lib/renderer/"): renderers.append(logical)
+                elif not logical.startswith(("etc/", "usr/")): worlds.append(logical)
     cdn_raw = ""
     try:
         if (DATA / "etc%2Fcdn").exists():
@@ -42,8 +42,8 @@ async def handle_info(method, body, params):
                         except Exception: pass
                         break
                 available.append({"name": f.stem, "description": desc})
-    skill_worlds = [d.name for d in sorted(DATA.iterdir())
-                    if d.is_dir() and d.name.startswith("skills-") and (d / "universe.db").exists()] if DATA.exists() else []
+    skill_worlds = [d.name.replace("%2F", "/") for d in sorted(DATA.iterdir())
+                    if d.is_dir() and d.name.startswith("usr%2Flib%2Fskills%2F") and (d / "universe.db").exists()] if DATA.exists() else []
     return {
         "routes": list(_plugins.keys()),
         "auth": auth_name,
