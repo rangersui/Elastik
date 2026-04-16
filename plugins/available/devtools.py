@@ -12,7 +12,7 @@ shell handy.
 
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives + cave primitives (stone/fire+ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus) + logic gates (not/and/or/xor/nand) — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, stone, fire, ash, wall, drum, trail, hunt, tomb, bones, river, soil, knot, shadow, amber, eclipse, narcissus, not, and, or, xor, nand, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
+DESCRIPTION = "Unix pipes + cave primitives + logic gates + electronic components. grep/tail/head/wc/rev/echo/null/full/true/false/yes/cowsay/moaisay/stone/fire/ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus/not/and/or/xor/nand/resistor/capacitor/inductor/diode/led/transistor/mosfet/relay/fuse/health/db/size/whoami/uuid/verify/delay/bench/config/dump/time"
 
 import sys, json, os, subprocess, time, sqlite3, hashlib, asyncio, random
 from pathlib import Path
@@ -360,6 +360,71 @@ async def handle_nand(method, body, params):
     a = params.get("a", "false").lower() == "true"
     b = params.get("b", "false").lower() == "true"
     return {"_html": str(not (a and b)).lower(), "_status": 200}
+
+
+# ── Electronic components — feedstock for circuit-editor ─────────────
+# Each route returns a small JSON descriptor. The circuit editor reads
+# these when building schematics; curl users get human-readable part
+# sheets. Values come from query params with sensible defaults.
+
+def _num(s, default):
+    try: return float(s)
+    except (TypeError, ValueError): return default
+
+
+async def handle_resistor(method, body, params):
+    """/resistor?ohm=470 — passive resistance."""
+    return {"type": "R", "value": _num(params.get("ohm"), 470), "unit": "\u03a9"}
+
+
+async def handle_capacitor(method, body, params):
+    """/capacitor?uf=100 — charge storage."""
+    return {"type": "C", "value": _num(params.get("uf"), 100), "unit": "\u03bcF"}
+
+
+async def handle_inductor(method, body, params):
+    """/inductor?mh=10 — magnetic field storage."""
+    return {"type": "L", "value": _num(params.get("mh"), 10), "unit": "mH"}
+
+
+async def handle_diode(method, body, params):
+    """/diode — one-way gate. forward voltage ~0.7V."""
+    return {"type": "D", "forward_v": _num(params.get("vf"), 0.7)}
+
+
+async def handle_led(method, body, params):
+    """/led?color=blue — light-emitting diode. color→wavelength."""
+    _WL = {"red": 635, "amber": 605, "yellow": 590, "green": 525,
+           "blue": 470, "violet": 405, "white": 0, "ir": 940, "uv": 385}
+    color = params.get("color", "red").lower()
+    return {"type": "LED", "color": color, "wavelength": _WL.get(color, 635)}
+
+
+async def handle_transistor(method, body, params):
+    """/transistor?type=npn — bipolar junction. npn or pnp."""
+    config = params.get("type", "npn").lower()
+    if config not in ("npn", "pnp"): config = "npn"
+    return {"type": "BJT", "config": config, "hfe": int(_num(params.get("hfe"), 100))}
+
+
+async def handle_mosfet(method, body, params):
+    """/mosfet?type=n — field-effect. n-channel or p-channel."""
+    config = params.get("type", "n").lower()
+    if config not in ("n", "p"): config = "n"
+    return {"type": "MOSFET", "channel": config,
+            "vgs_th": _num(params.get("vgs_th"), 2.0)}
+
+
+async def handle_relay(method, body, params):
+    """/relay?coil=24 — electromechanical switch. coil voltage + contact rating."""
+    return {"type": "RELAY",
+            "coil_v": _num(params.get("coil"), 24),
+            "contact_a": _num(params.get("contact"), 70)}
+
+
+async def handle_fuse(method, body, params):
+    """/fuse?a=15 — sacrificial link. amp rating."""
+    return {"type": "FUSE", "rating": _num(params.get("a"), 15), "unit": "A"}
 
 
 _COW = r"""
@@ -1105,6 +1170,15 @@ ROUTES = {
     "/or": handle_or,
     "/xor": handle_xor,
     "/nand": handle_nand,
+    "/resistor": handle_resistor,
+    "/capacitor": handle_capacitor,
+    "/inductor": handle_inductor,
+    "/diode": handle_diode,
+    "/led": handle_led,
+    "/transistor": handle_transistor,
+    "/mosfet": handle_mosfet,
+    "/relay": handle_relay,
+    "/fuse": handle_fuse,
     "/wc-c": handle_wc_c,
     "/full": handle_full,
     "/time": handle_time,
