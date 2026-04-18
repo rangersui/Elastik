@@ -1199,7 +1199,7 @@ ROUTES = {
     "/tail": handle_tail,
     "/head": handle_head,
     "/wc": handle_wc,
-    "/null": handle_null,
+    "/dev/null": handle_null,
     "/echo": handle_echo,
     "/health": handle_health,
     "/db/size": handle_db_size,
