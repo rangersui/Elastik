@@ -155,10 +155,10 @@ def conn(name):
     if name not in _db:
         d = DATA / _disk_name(name); d.mkdir(parents=True, exist_ok=True)
         db_path = d / "universe.db"
-        for ext in ("-shm", "-wal"):
-            stale = d / f"universe.db{ext}"
-            try: stale.unlink(missing_ok=True)
-            except OSError: pass
+        # NOTE: do NOT delete -wal/-shm here. They are not stale state — the
+        # WAL holds uncheckpointed commits. SQLite auto-recovers from WAL on
+        # open. Blowing them away silently nukes any small write that hadn't
+        # yet been checkpointed (default: <1000 pages). This cost us /etc/*.
         c = sqlite3.connect(str(db_path), check_same_thread=False)
         c.row_factory = sqlite3.Row
         try:
