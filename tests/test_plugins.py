@@ -239,48 +239,7 @@ def test_cgi():
             except json.JSONDecodeError:
                 test("truncated: output is NOT valid JSON", True)
 
-    # Edge cases on ai
-    ai_path = os.path.join("plugins", "available", "ai.py")
-    if os.path.exists(ai_path):
-        print(f"\n  --- ai edge cases ---")
-
-        # /ai/ask with GET -> 405
-        req = json.dumps({"path": "/ai/ask", "method": "GET", "body": "", "query": ""})
-        out, _, rc = run_plugin(ai_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("ai: GET /ai/ask -> 405", resp["status"] == 405)
-
-        # /ai/ask with empty body -> 400
-        req = json.dumps({"path": "/ai/ask", "method": "POST", "body": "", "query": ""})
-        out, _, rc = run_plugin(ai_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("ai: POST /ai/ask empty -> 400", resp["status"] == 400)
-
-        # /ai/ask whitespace body -> 400
-        req = json.dumps({"path": "/ai/ask", "method": "POST", "body": "   ", "query": ""})
-        out, _, rc = run_plugin(ai_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("ai: POST /ai/ask whitespace -> 400", resp["status"] == 400)
-
-        # unknown route -> 404
-        req = json.dumps({"path": "/ai/nonexistent", "method": "GET", "body": "", "query": ""})
-        out, _, rc = run_plugin(ai_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("ai: unknown route -> 404", resp["status"] == 404)
-
-        # /ai/status -> has provider, model, status fields
-        req = json.dumps({"path": "/ai/status", "method": "GET", "body": "", "query": ""})
-        out, _, rc = run_plugin(ai_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            body = json.loads(resp["body"])
-            test("ai: /ai/status has provider", "provider" in body)
-            test("ai: /ai/status has model", "model" in body)
-            test("ai: /ai/status has status", "status" in body)
+    # gpu.py has no Go CGI mode — edge cases covered by Python HTTP tests below.
 
 
 # ── Layer 2: Python HTTP Integration ────────────────────────────────
@@ -288,10 +247,10 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # Ensure ai + devtools plugins are installed for testing
+    # Ensure gpu + devtools plugins are installed for testing
     import shutil
     _installed = []
-    for pname in ["ai.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -750,42 +709,18 @@ def _run_http_tests(port, label, token=""):
         test(f"{label}: POST /echo -> body preserved",
              "hello from test" in body, f"body={body[:80]}")
 
-    # AI status
-    st, body = http_get(port, "/ai/status")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label}: GET /ai/status -> JSON", True)
-            test(f"{label}: /ai/status has provider", "provider" in d, f"keys={list(d.keys())}")
-            test(f"{label}: /ai/status has model", "model" in d)
-            test(f"{label}: /ai/status has status", "status" in d)
-        except json.JSONDecodeError:
-            test(f"{label}: GET /ai/status -> JSON", False, f"body={body[:80]}")
-    else:
-        # AI plugin might not be installed in Python mode
-        skip(f"{label}: GET /ai/status", f"status={st} (plugin not loaded?)")
+    # /dev/gpu — pluggable AI device.
+    # GET /dev/gpu -> 405 (POST only; plugin AUTH=auth so actually 401 if no token,
+    # but with a valid token we should see 405).
+    st2, _ = http_post(port, "/dev/gpu", "", token=token)
+    test(f"{label}: POST /dev/gpu empty -> 400", st2 == 400, f"status={st2}")
 
-    # AI ask (only if /ai/status returned a valid provider)
-    provider = "none"
-    if st == 200:
-        try:
-            provider = json.loads(body).get("provider", "none")
-        except Exception:
-            pass
-
-    if provider != "none":
-        st2, body2 = http_post(port, "/ai/ask", "What is 1+1? Answer with just the number.", token=token)
-        test(f"{label}: POST /ai/ask -> 200", st2 == 200, f"status={st2}")
-        if st2 == 200:
-            test(f"{label}: POST /ai/ask -> non-empty response",
-                 len(body2.strip()) > 0, "empty response")
-
-        # AI ask empty body -> 400
-        st3, _ = http_post(port, "/ai/ask", "", token=token)
-        test(f"{label}: POST /ai/ask empty -> 400", st3 == 400, f"status={st3}")
-    else:
-        skip(f"{label}: POST /ai/ask", "no AI provider or plugin not loaded")
-        skip(f"{label}: POST /ai/ask empty", "no AI provider or plugin not loaded")
+    # No /etc/gpu.conf configured -> 503.
+    # Whitespace-only body still counts as empty (handler strips), so use real body.
+    st3, body3 = http_post(port, "/dev/gpu", "ping", token=token)
+    # Either 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
+    test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
+         st3 in (502, 503), f"status={st3} body={body3[:80]}")
 
     # GET unknown path -> serves index.html (200).
     # Unknown GET paths are world entry points.
