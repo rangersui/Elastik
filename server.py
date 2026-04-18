@@ -394,13 +394,41 @@ async def app(scope, receive, send):
                     _method = "GET"
                     _qex = "&".join(f"{p}=..." for p in (_params or ["q"]))
                     _curl = f'curl "localhost:3005{route}?{_qex}"'
+                _script = (
+                    '<script>'
+                    'document.querySelectorAll("form").forEach(f=>f.addEventListener("submit",async e=>{'
+                    'e.preventDefault();'
+                    'const fd=new FormData(f),m=f.method.toUpperCase();'
+                    'let url=f.action,opts={method:m};'
+                    'if(m==="GET"){'
+                    'const q=new URLSearchParams();for(const[k,v]of fd)if(v)q.set(k,v);'
+                    'if([...q].length)url+="?"+q;'
+                    '}else{'
+                    'opts.body=fd.get("_body")||"";'
+                    'opts.headers={"Content-Type":"text/plain"};'
+                    '}'
+                    'let out=document.getElementById("_out");'
+                    'if(!out){out=document.createElement("div");out.id="_out";'
+                    'out.style="margin-top:1em;padding:1em;background:#0f172a;color:#e2e8f0;border-radius:4px;font:13px ui-monospace,monospace;overflow:auto";'
+                    'f.parentNode.appendChild(out);}'
+                    'out.innerHTML="<div style=\\"color:#94a3b8;font-size:11px;margin-bottom:6px\\">sending…</div>";'
+                    'try{'
+                    'const r=await fetch(url,opts),ct=r.headers.get("content-type")||"",t=await r.text();'
+                    'const meta=`<div style="color:#94a3b8;font-size:11px;margin-bottom:6px">HTTP ${r.status} · ${ct}</div>`;'
+                    'const pre=document.createElement("pre");pre.style="margin:0;white-space:pre-wrap;word-break:break-word";pre.textContent=t;'
+                    'out.innerHTML=meta;out.appendChild(pre);'
+                    '}catch(err){out.innerHTML=`<div style="color:#f87171">${err}</div>`;}'
+                    '}));'
+                    '</script>'
+                )
                 _man = (f'<meta charset="utf-8"><div style="font:14px/1.6 system-ui;max-width:700px;margin:2em auto;padding:0 1em">'
                         f'<h2 style="margin:0 0 .5em">{route}</h2>'
                         f'<pre style="white-space:pre-wrap;background:#f5f5f5;padding:1em;border-radius:4px;font-size:13px">{doc}</pre>'
                         f'<div style="margin:8px 0"><code style="background:#e8e8e8;padding:4px 8px;border-radius:3px;font-size:12px">{_curl}</code></div>'
                         f'<form method="{_method}" action="{route}" style="margin-top:1em;padding:1em;background:#fafafa;border:1px solid #eee;border-radius:4px">'
                         f'{_fields}'
-                        f'<button style="margin-top:8px;padding:6px 16px;cursor:pointer">{_method} {route}</button></form></div>')
+                        f'<button style="margin-top:8px;padding:6px 16px;cursor:pointer">{_method} {route}</button></form>'
+                        f'{_script}</div>')
                 return await send_r(send, 200, _man, "text/html")
         # If body came from a man-page HTML form, extract the _body field
         if b.startswith("_body="):
