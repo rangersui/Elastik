@@ -83,9 +83,20 @@ async def handle(method, body, params):
         # Single real world (not a prefix) → describe it as a file or collection
         world = _world_name(path)
         if world and world.endswith("/"): world = world[:-1]
-        if world and any(w == world for w in all_worlds):
+        is_world = world and any(w == world for w in all_worlds)
+        has_children = bool(world) and any(w.startswith(world + "/") for w in all_worlds)
+        # Top-level FHS namespaces always render as collections even when empty,
+        # so clients can discover them. Everything else: if the path doesn't
+        # match a world AND has no children, it's a 404. Without this, a
+        # PROPFIND on /dav/home/foo-that-doesnt-exist returned "collection",
+        # which caused WinSCP to drop files INTO the phantom "folder" →
+        # nested paths like /home/code/foo/foo.
+        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _SYS_PREFIXES))
+        if world and not is_world and not has_children and not is_top_ns:
+            return {"error":"not found", "_status":404}
+        if is_world:
             raw, ext = _read(world)
-            is_dir = ext == "dir" or any(w.startswith(world + "/") for w in all_worlds)
+            is_dir = ext == "dir" or has_children
             if not is_dir:
                 dav_href = f"/dav/home/{world}" if not world.startswith(_SYS_PREFIXES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
