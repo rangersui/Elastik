@@ -52,7 +52,7 @@ async def handle(method, body, params):
 
     if method == "OPTIONS":
         return {"_body":"", "_ct":"text/plain",
-                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, PROPFIND, MKCOL"]]}
+                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, COPY, PROPFIND, MKCOL"]]}
 
     # Strip /dav from path, normalise into a "DAV-level prefix" that mirrors
     # the FHS: "" (root), "home", "home/sub", "etc", "usr/lib", etc.
@@ -181,7 +181,7 @@ async def handle(method, body, params):
         raw, _ = _read(name)
         return {"_body":raw, "_ct":"text/plain"}
 
-    if method in ("PUT", "DELETE", "MOVE") and not _check_write_auth(scope):
+    if method in ("PUT", "DELETE", "MOVE", "COPY") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
                 "_headers":[["www-authenticate",'Basic realm="elastik"']]}
 
@@ -272,6 +272,70 @@ async def handle(method, body, params):
         src_disk.rename(dst_disk)
         server.log_event(dst_name, "stage_moved", {"from": src_name})
         # 201 if dst didn't exist before; 204 if it did (and overwrite was OK).
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "COPY":
+        # Duplicate a world (or prefix subtree) to a new path. RFC 4918 §9.8.
+        # Depth: infinity by default — a collection copy takes all children.
+        src_name = _world_name(path)
+        if not src_name:
+            return {"error":"COPY requires a source name", "_status":405}
+        if not server._valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = server.DATA / server._disk_name(src_name)
+        src_is_world = (src_disk / "universe.db").exists()
+        # Destination + Overwrite headers.
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _world_name(dest_path)
+        if not dst_name or not server._valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        # Build the (src, dst) pairs to copy. Includes src itself if it's a
+        # world, plus any descendants under src_name/. Empty = 404.
+        pairs = []
+        if src_is_world:
+            pairs.append((src_name, dst_name))
+        if server.DATA.exists():
+            for d in sorted(server.DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = server._logical_name(d.name)
+                    if w.startswith(src_name + "/"):
+                        pairs.append((w, dst_name + w[len(src_name):]))
+        if not pairs:
+            return {"error":"source not found", "_status":404}
+        # Tiered auth: T3 if either any src or any dst touches a system prefix.
+        touches_sys = any(s.startswith(_SYS_PREFIXES) or d.startswith(_SYS_PREFIXES) for s, d in pairs)
+        if touches_sys and server._check_auth(scope) != "approve":
+            return {"error":"system copy requires approve", "_status":403}
+        # Precheck: fail fast if any destination exists and Overwrite: F.
+        if not overwrite:
+            for _, dw in pairs:
+                if (server.DATA / server._disk_name(dw) / "universe.db").exists():
+                    return {"error":"destination exists", "_status":412}
+        import shutil, sqlite3
+        for sw, dw in pairs:
+            src_db = server.DATA / server._disk_name(sw) / "universe.db"
+            dst_dir = server.DATA / server._disk_name(dw)
+            dst_db = dst_dir / "universe.db"
+            # Checkpoint src so its WAL is merged into universe.db. File-level
+            # copy of universe.db then captures a consistent state. Without
+            # this, copying a world with uncheckpointed writes would lose data
+            # (the same class of bug that ate /etc/ before the WAL fix).
+            if sw in server._db:
+                try: server._db[sw].execute("PRAGMA wal_checkpoint(TRUNCATE)"); server._db[sw].commit()
+                except Exception: pass
+            if dst_dir.exists():
+                if dw in server._db: server._db.pop(dw).close()
+                shutil.rmtree(dst_dir)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_db, dst_db)
+            server.log_event(dw, "stage_copied", {"from": sw})
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MKCOL":
