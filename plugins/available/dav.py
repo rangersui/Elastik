@@ -52,7 +52,7 @@ async def handle(method, body, params):
 
     if method == "OPTIONS":
         return {"_body":"", "_ct":"text/plain",
-                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND"]]}
+                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, PROPFIND, MKCOL"]]}
 
     # Strip /dav from path, normalise into a "DAV-level prefix" that mirrors
     # the FHS: "" (root), "home", "home/sub", "etc", "usr/lib", etc.
@@ -181,7 +181,7 @@ async def handle(method, body, params):
         raw, _ = _read(name)
         return {"_body":raw, "_ct":"text/plain"}
 
-    if method in ("PUT", "DELETE") and not _check_write_auth(scope):
+    if method in ("PUT", "DELETE", "MOVE") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
                 "_headers":[["www-authenticate",'Basic realm="elastik"']]}
 
@@ -206,17 +206,72 @@ async def handle(method, body, params):
 
     if method == "DELETE":
         name = _world_name(path)
-        if not name: return {"error":"DELETE on collection not supported", "_status":405}
-        if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
+        if not name: return {"error":"DELETE requires a name", "_status":405}
+        if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
+        # Collect targets: the world itself (if exists) + any worlds under name/.
+        # Matches HTTP DELETE: "rm -rf prefix/" semantics.
+        targets = []
+        if (server.DATA / server._disk_name(name) / "universe.db").exists():
+            targets.append(name)
+        if server.DATA.exists():
+            for d in sorted(server.DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = server._logical_name(d.name)
+                    if w.startswith(name + "/"):
+                        targets.append(w)
+        if not targets:
             return {"error":"not found", "_status":404}
-        if server._check_auth(scope) != "approve":
-            return {"error": "delete requires approve", "_status": 403}
-        if name in server._db: server._db.pop(name).close()
+        # Tiered auth mirrors PUT: system paths → T3, user paths → T2.
+        needs_approve = any(t.startswith(_SYS_PREFIXES) for t in targets)
+        if needs_approve and server._check_auth(scope) != "approve":
+            return {"error":"system delete requires approve", "_status":403}
         import shutil
-        trash = server.DATA / ".trash" / server._disk_name(name)
-        trash.parent.mkdir(parents=True, exist_ok=True)
-        if trash.exists(): shutil.rmtree(trash)
-        (server.DATA / server._disk_name(name)).rename(trash)
+        for w in targets:
+            if w in server._db: server._db.pop(w).close()
+            trash = server.DATA / ".trash" / server._disk_name(w)
+            trash.parent.mkdir(parents=True, exist_ok=True)
+            if trash.exists(): shutil.rmtree(trash)
+            (server.DATA / server._disk_name(w)).rename(trash)
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MOVE":
+        # Rename / move a world. WinSCP: rename file, drag file to new folder.
+        src_name = _world_name(path)
+        if not src_name:
+            return {"error":"MOVE requires a source name", "_status":405}
+        if not server._valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = server.DATA / server._disk_name(src_name)
+        if not (src_disk / "universe.db").exists():
+            return {"error":"source not found", "_status":404}
+        # Destination + Overwrite headers (RFC 4918 §9.9).
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _world_name(dest_path)
+        if not dst_name or not server._valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        # Tiered auth: T3 if either endpoint touches a system prefix.
+        if (src_name.startswith(_SYS_PREFIXES) or dst_name.startswith(_SYS_PREFIXES)) \
+           and server._check_auth(scope) != "approve":
+            return {"error":"system move requires approve", "_status":403}
+        dst_disk = server.DATA / server._disk_name(dst_name)
+        if dst_disk.exists():
+            if not overwrite:
+                return {"error":"destination exists", "_status":412}
+            import shutil
+            shutil.rmtree(dst_disk)
+        if src_name in server._db: server._db.pop(src_name).close()
+        if dst_name in server._db: server._db.pop(dst_name).close()
+        dst_disk.parent.mkdir(parents=True, exist_ok=True)
+        src_disk.rename(dst_disk)
+        server.log_event(dst_name, "stage_moved", {"from": src_name})
+        # 201 if dst didn't exist before; 204 if it did (and overwrite was OK).
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MKCOL":

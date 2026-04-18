@@ -496,19 +496,39 @@ async def app(scope, receive, send):
             "pid": os.getpid(), "uptime": int(time.time() - _BOOT),
             "worlds": n, "plugins": len(_plugin_meta), "version": VERSION}))
 
-    # DELETE /home/{name} → approve only → move to .trash
-    if method == "DELETE" and len(parts) >= 2 and parts[0] == "home":
-        name = "/".join(parts[1:])  # strip "home" prefix
+    # DELETE /{fhs}/{name} → tiered auth (mirrors PUT), move to .trash, recursive.
+    #   /home/* → T2 auth; /etc/* /usr/* /var/* /boot/* → T3 approve.
+    #   If `name` is a prefix (has children but isn't itself a world), all
+    #   matching children are moved. If `name` IS a world, it plus any children
+    #   under it are moved — "rm -rf prefix/" semantics.
+    if method == "DELETE" and len(parts) >= 2 and parts[0] in _FHS:
+        name = "/".join(parts[1:]) if parts[0] == "home" else "/".join(parts)
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
-        db = DATA / _disk_name(name) / "universe.db"
-        if not db.exists(): return await send_r(send, 404, '{"error":"world not found"}')
-        if _check_auth(scope) != "approve": return await send_r(send, 403, '{"error":"delete requires approve"}')
-        if name in _db: _db.pop(name).close()
-        trash = DATA / ".trash" / _disk_name(name)
-        trash.parent.mkdir(parents=True, exist_ok=True)
-        if trash.exists(): shutil.rmtree(trash)
-        (DATA / _disk_name(name)).rename(trash)
-        return await send_r(send, 200, json.dumps({"deleted": name}))
+        # Collect targets: the world itself (if exists) + any worlds under name/
+        targets = []
+        if (DATA / _disk_name(name) / "universe.db").exists():
+            targets.append(name)
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = _logical_name(d.name)
+                    if w.startswith(name + "/"):
+                        targets.append(w)
+        if not targets:
+            return await send_r(send, 404, '{"error":"world not found"}')
+        # Auth: T3 if any target is under a system prefix; else T2 is enough.
+        needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/")) for t in targets)
+        if needs_approve and _check_auth(scope) != "approve":
+            return await send_r(send, 403, '{"error":"system delete requires approve"}')
+        if not needs_approve and AUTH_TOKEN and _check_auth(scope) is None:
+            return await send_r(send, 403, '{"error":"unauthorized"}')
+        for w in targets:
+            if w in _db: _db.pop(w).close()
+            trash = DATA / ".trash" / _disk_name(w)
+            trash.parent.mkdir(parents=True, exist_ok=True)
+            if trash.exists(): shutil.rmtree(trash)
+            (DATA / _disk_name(w)).rename(trash)
+        return await send_r(send, 200, json.dumps({"deleted": targets}))
 
     # Trailing slash on FHS paths = ls (list children). Like Unix: cd dir/ vs cat file.
     # GET /home/       → ls all user worlds
