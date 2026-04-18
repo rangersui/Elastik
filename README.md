@@ -38,7 +38,7 @@ Every path is a world. Writing to a new path creates it. FHS layout:
 /var/log/    system logs
 /proc/       introspection (uptime, version, status, worlds)
 /bin/        commands (plugin routes)
-/dev/        devices (stone, fire, river, db)
+/dev/        devices (gpu, stone, fire, river, db)
 /mnt/        local filesystem mounts (via /etc/fstab)
 /dav/        WebDAV (mount in Finder/Explorer)
 ```
@@ -99,6 +99,32 @@ ELASTIK_TOKEN=your-t2-token
 ELASTIK_APPROVE_TOKEN=your-t3-token
 ```
 
+## Capability tokens
+
+Give an AI a path-scoped key instead of the full T2/T3 token.
+
+```bash
+# T3 mints a cap scoped to /home/scratch, 1-hour TTL, read+write:
+curl -X POST "localhost:3005/auth/mint?prefix=/home/scratch&ttl=3600&mode=rw" \
+  -H "Authorization: Bearer $APPROVE"
+# → {"token":"<base64>.<hmac>"}
+```
+
+HMAC-signed, carries its own expiry, rejects anything outside `prefix`.
+`mode=r` is read-only. No server state to revoke — wait for the TTL.
+
+```bash
+# AI writes inside /home/scratch:
+curl -X PUT localhost:3005/home/scratch/notes \
+  -H "Authorization: Bearer $CAP_TOKEN" -d "notes"
+
+# But not outside:
+curl -X PUT localhost:3005/home/other ...  # → 403
+curl -X PUT localhost:3005/etc/foo  ...    # → 403
+```
+
+chroot for LLMs. Physics, not policy.
+
 ## Connect AI
 
 Tell any AI:
@@ -133,7 +159,7 @@ curl -X POST /admin/load -H "Authorization: Bearer $APPROVE" -d "devtools"
 | browser | Chrome/Brave/Edge remote control via CDP |
 | db | /dev/db — read-only SQL on any SQLite |
 | shell | Browser terminal |
-| ai | Ollama/Claude/OpenAI/Deepseek/Google relay |
+| gpu | `/dev/gpu` — AI as device. Backend via `/etc/gpu.conf`. Ollama/Claude/OpenAI/Deepseek/Vast. |
 | sse | Server-Sent Events — real-time streaming |
 
 ## Pipes
