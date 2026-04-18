@@ -72,6 +72,10 @@ _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/pla
 def _ext_to_ct(ext): return _CT.get(ext or "plain", "application/octet-stream")
 _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
                "wav","ogg","woff","woff2","ttf","otf","eot","bin"}
+# FHS top-level namespaces + per-world internal ops. Module-level so
+# DELETE (line <710) can read them before the GET-ls branch would assign.
+_FHS = {"home", "etc", "usr", "var", "boot"}
+_INTERNAL = {"sync", "pending", "result", "clear"}
 
 def _infer_type(stage_html):
     """Heuristic for one-time migration of pre-type-column worlds."""
@@ -706,8 +710,6 @@ async def app(scope, receive, send):
     # GET /home/       → ls all user worlds
     # GET /etc/        → ls config worlds
     # GET /home/photos/→ ls worlds under photos/
-    _FHS = {"home", "etc", "usr", "var", "boot"}
-    _INTERNAL = {"sync", "pending", "result", "clear"}
     if method == "GET" and len(parts) >= 1 and parts[0] in _FHS and trailing_slash:
         # Determine world-name prefix for ls
         if parts[0] == "home":

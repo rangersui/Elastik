@@ -488,6 +488,15 @@ def _run_auth_tests(port, label, token, approve):
     test(f"{label} auth: read -> data persisted", st == 200 and "hello" in body,
          f"status={st} body={body[:60]}")
 
+    # ── Core DELETE on /home/* (not via /dav) ──
+    # Regression guard: _FHS must be module-level, else DELETE /home/... raises
+    # UnboundLocalError before reaching auth check.
+    http_method(port, "/home/del-core-test", method="PUT", body="x", token=token)
+    st, _ = http_method(port, "/home/del-core-test", method="DELETE", token=token)
+    test(f"{label} auth: DELETE /home/* -> 200", st == 200, f"status={st}")
+    st, _ = http_get(port, "/home/del-core-test")
+    test(f"{label} auth: DELETE removed world", st == 404, f"status={st}")
+
     # ── /etc/* worlds require approve ──
 
     st, _ = http_method(port, "/etc/test", method="PUT", body="data", token=token)
