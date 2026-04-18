@@ -15,11 +15,20 @@ def _check_write_auth(scope):
     return server._check_auth(scope) is not None
 
 def _suffix(rest, ext):
-    """Render-time ext decoration for PROPFIND hrefs. Dotless last segment +
-    ext not in (html, dir, plain none) → append .{ext}. 'plain' → '.txt'."""
+    """Render-time ext decoration for PROPFIND hrefs.
+
+      already has a dot      → ""
+      dir or empty           → ""
+      html                   → ".html.txt"  — file:// has no sandbox,
+                                              append .txt so local open
+                                              uses text viewer not browser
+      plain                  → ".txt"
+      anything else          → ".{ext}"
+    """
     last = rest.rsplit("/", 1)[-1]
     if "." in last: return ""
-    if not ext or ext in ("dir", "html"): return ""
+    if not ext or ext == "dir": return ""
+    if ext == "html": return ".html.txt"
     if ext == "plain": return ".txt"
     return f".{ext}"
 
@@ -27,10 +36,10 @@ def _world_name(path):
     """DAV URL → world name. Identity first, strip-and-retry fallback.
 
     Fast path: strip /dav and home/ URL sugar, return the rest verbatim.
-    Fallback: if no world exists at that name, strip the last segment's
-    last dot and retry. This lets DAV access legacy worlds created with
-    dotless names (e.g. 'meeting-0412') via PROPFIND-decorated hrefs
-    (e.g. '/dav/home/meeting-0412.txt').
+    Fallback: iteratively strip the last segment's last dot (up to twice,
+    since html worlds are decorated as .html.txt) and retry the disk
+    lookup. Lets DAV access legacy worlds created with dotless names via
+    PROPFIND-decorated hrefs.
 
     Writes (PUT/MKCOL) hit the identity path — a brand-new world name
     matches no existing world, so we return it as-is for creation.
@@ -39,15 +48,16 @@ def _world_name(path):
     if rest.startswith("home/"): rest = rest[5:]
     elif rest == "home": rest = ""
     if not rest: return ""
-    if (server.DATA / server._disk_name(rest) / "universe.db").exists():
-        return rest
-    segs = rest.split("/")
-    last = segs[-1]
-    dot = last.rfind(".")
-    if dot > 0:
-        stripped = "/".join(segs[:-1] + [last[:dot]])
-        if (server.DATA / server._disk_name(stripped) / "universe.db").exists():
-            return stripped
+    candidate = rest
+    for _ in range(3):  # original + up to 2 strips (covers .html.txt double-ext)
+        if (server.DATA / server._disk_name(candidate) / "universe.db").exists():
+            return candidate
+        segs = candidate.split("/")
+        last = segs[-1]
+        dot = last.rfind(".")
+        if dot <= 0:
+            break
+        candidate = "/".join(segs[:-1] + [last[:dot]])
     return rest
 
 def _read(name):
