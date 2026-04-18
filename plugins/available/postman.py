@@ -11,8 +11,17 @@ ROUTES = {}
 
 
 async def handle_postman(method, body, params):
+    """POST /postman — curl proxy. CORS bypass from the browser.
+
+    body (JSON):
+      {"url": "https://api.github.com/x", "method": "GET",
+       "headers": {}, "body": ""}
+
+    Returns the response body verbatim. Requires approve token —
+    this is curl with your server's IP.
+    """
     try:
-        b = json.loads(body) if body else {}
+        b = json.loads(body) if body and body.strip() else {}
     except (json.JSONDecodeError, TypeError):
         return {"error": "invalid JSON body", "_status": 400}
     url = b.get("url", "")

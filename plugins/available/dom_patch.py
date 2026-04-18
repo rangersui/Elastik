@@ -265,11 +265,26 @@ def _apply_ops(html, ops):
 # --- Plugin route handler ---
 
 async def handle_dom_patch(method, body, params):
-    data = body if isinstance(body, dict) else json.loads(body if isinstance(body, str) else body.decode("utf-8"))
+    """POST /dom-patch — CSS-selector DOM mutations on a world's HTML.
+
+    body (JSON):
+      {"world": "status", "ops": [{"op": "text", "selector": "#count", "text": "42"}]}
+
+    Ops: replace, append, prepend, remove, attr, text. Atomic — all
+    succeed or none applied. Selectors: tag, #id, .class, tag#id, .a.b.
+    """
+    if isinstance(body, dict):
+        data = body
+    else:
+        raw = body if isinstance(body, str) else body.decode("utf-8", "replace")
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            return {"error": "body must be JSON", "_status": 400}
     world = data.get("world", "default")
     ops = data.get("ops", [])
     if not ops:
-        return {"error": "no ops provided"}
+        return {"error": "no ops provided", "_status": 400}
 
     c = conn(world)
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]

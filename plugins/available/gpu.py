@@ -155,6 +155,19 @@ def _read_conf():
 # ── Route handler ────────────────────────────────────────────
 
 async def handle(method, body, params):
+    """POST /dev/gpu — AI as a pluggable device. Text in, text out.
+
+    body: raw prompt (no JSON wrapper).
+    query: ?model=xxx overrides the backend's default model.
+
+    Backend from /etc/gpu.conf (scheme://endpoint, e.g. ollama://...,
+    openai://api.openai.com, claude://api.anthropic.com, vast://...).
+    Keys via env: OPENAI_API_KEY / ANTHROPIC_API_KEY / VAST_API_KEY /
+    DEEPSEEK_API_KEY. Ollama needs no key.
+
+    Pipe-friendly:
+      curl /home/article?raw | curl -X POST /dev/gpu --data-binary @-
+    """
     if method != "POST":
         return {"error": "POST only — body=prompt, response=text/plain",
                 "_status": 405}

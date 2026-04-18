@@ -77,11 +77,26 @@ def apply_patch(html, ops):
 
 
 async def handle_patch(method, body, params):
-    data = body if isinstance(body, dict) else json.loads(body if isinstance(body, str) else body.decode("utf-8"))
+    """POST /patch — composable string operations on a world's stage.
+
+    body (JSON):
+      {"world": "default", "ops": [{"op": "prepend", "text": "hi "}]}
+
+    Ops: insert, delete, replace, replace_all, slice, prepend, regex_replace.
+    See module docstring for op parameters.
+    """
+    if isinstance(body, dict):
+        data = body
+    else:
+        raw = body if isinstance(body, str) else body.decode("utf-8", "replace")
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            return {"error": "body must be JSON", "_status": 400}
     world = data.get("world", "default")
     ops = data.get("ops", [])
     if not ops:
-        return {"error": "no ops provided"}
+        return {"error": "no ops provided", "_status": 400}
     c = conn(world)
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
     new_html, applied = apply_patch(old, ops)

@@ -87,12 +87,25 @@ def _ollama(model, messages, think=False, timeout=120):
 # ── handler ─────────────────────────────────────────────────────────────
 
 async def handle_consult(method, body, params):
+    """POST /consult — ask the AI a question with world context.
+
+    body (JSON):
+      {"question": "summarize the readme", "worlds": ["readme"]}
+
+    If `worlds` omitted, a chief-of-staff model picks relevant ones.
+    Returns: {"answer", "advisor", "chief", "worlds_read"}.
+
+    Config: /etc/consult.json sets {advisor, chief} ollama models.
+    """
     _reload_config()
 
-    b = json.loads(body) if body else {}
+    try:
+        b = json.loads(body) if body and body.strip() else {}
+    except json.JSONDecodeError:
+        return {"error": "body must be JSON", "_status": 400}
     question = params.get("question") or b.get("question", "")
     if not question:
-        return {"error": "question required"}
+        return {"error": "question required", "_status": 400}
 
     explicit_worlds = b.get("worlds")
 
