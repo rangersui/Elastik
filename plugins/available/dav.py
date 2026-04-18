@@ -226,7 +226,7 @@ async def handle(method, body, params):
         raw, ext = _read(name)
         return {"_body":raw, "_ct":server._ext_to_ct(ext)}
 
-    if method in ("PUT", "DELETE", "MOVE", "COPY") and not _check_write_auth(scope):
+    if method in ("PUT", "DELETE", "MOVE", "COPY", "MKCOL") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
                 "_headers":[["www-authenticate",'Basic realm="elastik"']]}
 
@@ -279,13 +279,9 @@ async def handle(method, body, params):
         needs_approve = any(t.startswith(_SYS_PREFIXES) for t in targets)
         if needs_approve and server._check_auth(scope) != "approve":
             return {"error":"system delete requires approve", "_status":403}
-        import shutil
         for w in targets:
-            if w in server._db: server._db.pop(w).close()
-            trash = server.DATA / ".trash" / server._disk_name(w)
-            trash.parent.mkdir(parents=True, exist_ok=True)
-            if trash.exists(): shutil.rmtree(trash)
-            (server.DATA / server._disk_name(w)).rename(trash)
+            server._release_world(w)
+            server._move_to_trash(w)
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MOVE":
@@ -320,10 +316,19 @@ async def handle(method, body, params):
                 return {"error":"destination exists", "_status":412}
             import shutil
             shutil.rmtree(dst_disk)
-        if src_name in server._db: server._db.pop(src_name).close()
-        if dst_name in server._db: server._db.pop(dst_name).close()
+        # Release any cached sqlite handles before renaming (Windows quirk).
+        server._release_world(src_name)
+        server._release_world(dst_name)
         dst_disk.parent.mkdir(parents=True, exist_ok=True)
-        src_disk.rename(dst_disk)
+        import shutil, time
+        for attempt in range(5):
+            try:
+                src_disk.rename(dst_disk)
+                break
+            except PermissionError:
+                time.sleep(0.02 * (attempt + 1))
+        else:
+            shutil.move(str(src_disk), str(dst_disk))
         server.log_event(dst_name, "stage_moved", {"from": src_name})
         # 201 if dst didn't exist before; 204 if it did (and overwrite was OK).
         return {"_status":204, "_body":"", "_ct":"text/plain"}

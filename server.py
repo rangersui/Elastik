@@ -216,6 +216,44 @@ def _check_auth(scope):
 
 _db = {}
 
+def _release_world(name):
+    """Close cached sqlite connection for `name`, collect garbage, and wait
+    briefly for Windows to release file handles. Use before rename()-ing a
+    world dir out of place (DELETE, MOVE). Without this, Windows throws
+    PermissionError from lingering file handles on universe.db-wal/-shm
+    even after close() — sqlite3 cursor objects sometimes keep the handle
+    alive until gc."""
+    import gc, time
+    if name in _db:
+        try: _db[name].execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception: pass
+        _db.pop(name).close()
+    gc.collect()
+    # One tiny yield so the OS can process handle release before rename.
+    time.sleep(0.005)
+
+def _move_to_trash(name):
+    """Move world dir to .trash/<disk_name>. Idempotent with retries for
+    the Windows file-lock race. Call _release_world first."""
+    import shutil
+    src = DATA / _disk_name(name)
+    if not src.exists():
+        return
+    trash = DATA / ".trash" / _disk_name(name)
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    if trash.exists():
+        shutil.rmtree(trash)
+    # Try rename up to 5 times with growing backoff. If all fail, fall
+    # back to shutil.move which does copy+delete — slower, always works.
+    import time
+    for attempt in range(5):
+        try:
+            src.rename(trash)
+            return
+        except PermissionError:
+            time.sleep(0.02 * (attempt + 1))
+    shutil.move(str(src), str(trash))
+
 def conn(name):
     if name not in _db:
         d = DATA / _disk_name(name); d.mkdir(parents=True, exist_ok=True)
@@ -646,11 +684,8 @@ async def app(scope, receive, send):
         if isinstance(auth, str) and auth.startswith("cap:r:"):
             return await send_r(send, 403, '{"error":"read-only token"}')
         for w in targets:
-            if w in _db: _db.pop(w).close()
-            trash = DATA / ".trash" / _disk_name(w)
-            trash.parent.mkdir(parents=True, exist_ok=True)
-            if trash.exists(): shutil.rmtree(trash)
-            (DATA / _disk_name(w)).rename(trash)
+            _release_world(w)
+            _move_to_trash(w)
         return await send_r(send, 200, json.dumps({"deleted": targets}))
 
     # Trailing slash on FHS paths = ls (list children). Like Unix: cd dir/ vs cat file.
