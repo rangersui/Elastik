@@ -1,6 +1,6 @@
 """DOM Patch — CSS-selector-based HTML mutations. Zero dependencies.
 
-POST /proxy/dom-patch  body: {"world": "sensors", "ops": [...]}
+POST /dom-patch  body: {"world": "sensors", "ops": [...]}
 
 Supported ops:
   replace   {"op":"replace", "selector":"#temp-value", "html":"48.1°C"}
@@ -22,7 +22,7 @@ DESCRIPTION = "DOM-aware HTML patch with CSS selectors (zero deps)"
 SKILL = """\
 # Writing Strategy — DOM Patch
 
-POST /proxy/dom-patch body:
+POST /dom-patch body:
 {
   "world": "status-page",
   "ops": [
@@ -48,7 +48,7 @@ Use renderer + JSON data separation when possible (see /usr/lib/skills/data).
 ROUTES = {}
 
 PARAMS_SCHEMA = {
-    "/proxy/dom-patch": {
+    "/dom-patch": {
         "method": "POST",
         "params": {
             "world": {"type": "string", "required": True, "description": "Target world name"},
@@ -290,4 +290,4 @@ async def handle_dom_patch(method, body, params):
     return {"version": v, "applied": applied, "length": len(new_html)}
 
 
-ROUTES["/proxy/dom-patch"] = handle_dom_patch
+ROUTES["/dom-patch"] = handle_dom_patch

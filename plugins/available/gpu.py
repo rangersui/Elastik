@@ -77,7 +77,7 @@ def _post_json(url, data, headers=None, timeout=180):
 
 def _ask_ollama(endpoint, prompt, model):
     r = _post_json(f"http://{endpoint}/api/generate",
-                   {"model": model or os.getenv("OLLAMA_MODEL", "llama3.1"),
+                   {"model": model or os.getenv("OLLAMA_MODEL", "qwen3:0.6b"),
                     "prompt": prompt, "stream": False})
     return r.get("response", "")
 

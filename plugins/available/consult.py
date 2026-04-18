@@ -56,7 +56,7 @@ def _reload_config():
 # ── params schema ───────────────────────────────────────────────────────
 
 PARAMS_SCHEMA = {
-    "/proxy/consult": {
+    "/consult": {
         "method": "POST",
         "params": {
             "question": {"type": "string", "required": True, "description": "Question to ask"},
@@ -183,4 +183,4 @@ async def handle_consult(method, body, params):
         return {"error": str(e), "advisor": _config["advisor"], "chief": _config["chief"], "worlds_read": selected}
 
 
-ROUTES["/proxy/consult"] = handle_consult
+ROUTES["/consult"] = handle_consult

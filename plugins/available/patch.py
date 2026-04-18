@@ -1,6 +1,6 @@
 """Patch — composable string operations on any world's stage.
 
-POST /proxy/patch  body: {"world": "default", "ops": [...]}
+POST /patch  body: {"world": "default", "ops": [...]}
 
 Supported ops:
   insert       {op:"insert", pos:0, text:"hello"}
@@ -19,7 +19,7 @@ DESCRIPTION = "String operations: insert, delete, replace, prepend, slice, regex
 ROUTES = {}
 
 PARAMS_SCHEMA = {
-    "/proxy/patch": {
+    "/patch": {
         "method": "POST",
         "params": {
             "world": {"type": "string", "required": True, "description": "Target world name"},
@@ -92,4 +92,4 @@ async def handle_patch(method, body, params):
     return {"version": v, "applied": applied, "length": len(new_html)}
 
 
-ROUTES["/proxy/patch"] = handle_patch
+ROUTES["/patch"] = handle_patch
