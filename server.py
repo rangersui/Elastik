@@ -122,18 +122,83 @@ def _lookup_etc_auth(user, pwd):
         return None
 
 
-def _check_auth(scope):
-    """Authorization header → 'approve' (T3), 'auth' (T2), or None.
+def _b64e(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+def _b64d(s):
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
-    Sources, in priority order:
-      1. Env tokens APPROVE_TOKEN / AUTH_TOKEN (bootstrap, Bearer or Basic pwd)
-      2. /etc/passwd + /etc/shadow lookup (Basic user:pass, multi-user)
+def _mint_cap(prefix, ttl_sec=3600, mode="rw"):
+    """Issue a capability token: <b64url(payload)>.<b64url(hmac)>.
+    payload = `<prefix>|<exp_sec>|<mode>`. HMAC-SHA256 over payload with KEY.
+    prefix is normalized — leading "/", no trailing "/" unless root."""
+    prefix = prefix if prefix.startswith("/") else "/" + prefix
+    prefix = prefix.rstrip("/") or "/"
+    if mode not in ("r", "rw"):
+        raise ValueError("mode must be 'r' or 'rw'")
+    exp = int(time.time()) + int(ttl_sec)
+    payload = f"{prefix}|{exp}|{mode}".encode()
+    sig = _hmac.new(KEY, payload, hashlib.sha256).digest()
+    return _b64e(payload) + "." + _b64e(sig)
+
+def _verify_cap(token):
+    """Returns (prefix, exp, mode) or None. HMAC + expiration check."""
+    parts = token.split(".", 1)
+    if len(parts) != 2: return None
+    try:
+        payload = _b64d(parts[0])
+        sig = _b64d(parts[1])
+    except Exception:
+        return None
+    expected = _hmac.new(KEY, payload, hashlib.sha256).digest()
+    if not _hmac.compare_digest(sig, expected): return None
+    try:
+        prefix, exp_s, mode = payload.decode().split("|", 2)
+        exp = int(exp_s)
+    except Exception:
+        return None
+    if mode not in ("r", "rw"): return None
+    if exp < int(time.time()): return None
+    return prefix, exp, mode
+
+def _path_in_scope(path, prefix):
+    """Path canonicalization + prefix-boundary check.
+    Resolves '..' via posixpath.normpath BEFORE the startswith check —
+    without this step, '/home/dreams/../etc/shadow' would pass a naive
+    startswith on '/home/dreams'. Boundary-sensitive: '/home/dre' must
+    not match '/home/dreams'."""
+    import posixpath
+    cleaned = posixpath.normpath("/" + path.lstrip("/"))
+    p = prefix.rstrip("/") or "/"
+    if p == "/":
+        return True  # root scope covers everything
+    return cleaned == p or cleaned.startswith(p + "/")
+
+
+def _check_auth(scope):
+    """Authorization header → auth level.
+
+    Returns:
+      "approve"                 — T3 admin (env APPROVE_TOKEN or Basic pwd)
+      "auth"                    — T2 user (env AUTH_TOKEN or Basic pwd)
+      "cap:<mode>:<prefix>"     — scoped capability token, valid + in-scope
+      None                      — anonymous OR out-of-scope cap (indistinguishable
+                                  by design — leaks no path existence)
+
+    Cap tokens are recognized by a '.' in the bearer token (they are
+    `<b64>.<b64>` shaped). Legacy opaque tokens have no dot.
     """
     for k, v in scope.get("headers", []):
         if k == b"authorization":
             a = v.decode("utf-8", "replace")
             if a.startswith("Bearer "):
                 tok = a[7:]
+                if "." in tok:
+                    cap = _verify_cap(tok)
+                    if cap is None: return None
+                    prefix, _exp, mode = cap
+                    if _path_in_scope(scope.get("path", "/"), prefix):
+                        return f"cap:{mode}:{prefix}"
+                    return None
                 if APPROVE_TOKEN and _hmac.compare_digest(tok, APPROVE_TOKEN): return "approve"
                 if AUTH_TOKEN and _hmac.compare_digest(tok, AUTH_TOKEN): return "auth"
             elif a.startswith("Basic "):
@@ -524,6 +589,32 @@ async def app(scope, receive, send):
             "pid": os.getpid(), "uptime": int(time.time() - _BOOT),
             "worlds": n, "plugins": len(_plugin_meta), "version": VERSION}))
 
+    # /auth/mint — approve-only, issue a path-scoped capability token.
+    #   POST /auth/mint?prefix=/home/dreams&ttl=3600&mode=rw
+    # Token format: <b64url(prefix|exp|mode)>.<b64url(HMAC-SHA256)>.
+    # Verify in _check_auth; path canonicalized before prefix check.
+    if method == "POST" and path == "/auth/mint":
+        if _check_auth(scope) != "approve":
+            return await send_r(send, 403, '{"error":"approve required to mint"}')
+        qs = scope.get("query_string", b"").decode()
+        p = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
+        prefix = p.get("prefix", "/home")
+        mode = p.get("mode", "rw")
+        try:
+            ttl = int(p.get("ttl", "3600"))
+        except ValueError:
+            return await send_r(send, 400, '{"error":"ttl must be int seconds"}')
+        if mode not in ("r", "rw"):
+            return await send_r(send, 400, '{"error":"mode must be r or rw"}')
+        try:
+            tok = _mint_cap(prefix, ttl, mode)
+        except ValueError as e:
+            return await send_r(send, 400, json.dumps({"error": str(e)}))
+        return await send_r(send, 200, json.dumps({
+            "token": tok, "prefix": prefix, "mode": mode,
+            "ttl_sec": ttl, "exp": int(time.time()) + ttl,
+        }))
+
     # DELETE /{fhs}/{name} → tiered auth (mirrors PUT), move to .trash, recursive.
     #   /home/* → T2 auth; /etc/* /usr/* /var/* /boot/* → T3 approve.
     #   If `name` is a prefix (has children but isn't itself a world), all
@@ -545,11 +636,15 @@ async def app(scope, receive, send):
         if not targets:
             return await send_r(send, 404, '{"error":"world not found"}')
         # Auth: T3 if any target is under a system prefix; else T2 is enough.
+        # Capability tokens in read-only mode are rejected for writes.
+        auth = _check_auth(scope)
         needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/")) for t in targets)
-        if needs_approve and _check_auth(scope) != "approve":
+        if needs_approve and auth != "approve":
             return await send_r(send, 403, '{"error":"system delete requires approve"}')
-        if not needs_approve and AUTH_TOKEN and _check_auth(scope) is None:
+        if not needs_approve and AUTH_TOKEN and auth is None:
             return await send_r(send, 403, '{"error":"unauthorized"}')
+        if isinstance(auth, str) and auth.startswith("cap:r:"):
+            return await send_r(send, 403, '{"error":"read-only token"}')
         for w in targets:
             if w in _db: _db.pop(w).close()
             trash = DATA / ".trash" / _disk_name(w)
@@ -605,6 +700,7 @@ async def app(scope, receive, send):
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         # ── Auth gates ──
         if method in ("PUT", "POST"):
+            auth = _check_auth(scope)
             if iop:
                 # Internal ops (sync/pending/result/clear): need auth OR same-origin.
                 # Browser iframe is same-origin (sends Origin header). curl without
@@ -615,16 +711,19 @@ async def app(scope, receive, send):
                 for k, v in scope.get("headers", []):
                     if k == b"origin": origin = v.decode(); break
                 is_local = origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]"))
-                has_auth = _check_auth(scope) is not None
+                has_auth = auth is not None
                 if origin and not is_local:
                     return await send_r(send, 403, '{"error":"cross-origin rejected"}')
                 if not has_auth and not is_local:
                     return await send_r(send, 403, '{"error":"unauthorized"}')
             elif name.startswith(("etc/", "usr/", "var/", "boot/")):
-                if _check_auth(scope) != "approve":
+                if auth != "approve":
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
-            elif AUTH_TOKEN and _check_auth(scope) is None:
+            elif AUTH_TOKEN and auth is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
+            # Capability tokens in read-only mode cannot write.
+            if isinstance(auth, str) and auth.startswith("cap:r:"):
+                return await send_r(send, 403, '{"error":"read-only token"}')
         # Sensitive-read gate moved into the GET handler below (after
         # browser detection). Browser navigations always get index.html;
         # the iframe's own fetch hits the gate separately.
