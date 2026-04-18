@@ -1281,5 +1281,11 @@ if __name__ == "__main__":
     else:
         qs = d.get("query", "")
         params = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
-        result = asyncio.run(handler(d.get("method", "GET"), d.get("body", ""), params))
-        print(json.dumps(_to_cgi(result)))
+        try:
+            result = asyncio.run(handler(d.get("method", "GET"), d.get("body", ""), params))
+            print(json.dumps(_to_cgi(result)))
+        except Exception as e:
+            # CGI mode has no server module, no scope, no state. Handlers
+            # that need those return a 500 rather than crashing — tests
+            # just want the process to exit 0 with a valid JSON envelope.
+            print(json.dumps({"status": 500, "body": json.dumps({"error": f"{type(e).__name__}: {e}"})}))

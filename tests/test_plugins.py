@@ -525,8 +525,10 @@ def _run_auth_tests(port, label, token, approve):
                         headers={"Origin": "http://localhost:13007"})
     test(f"{label} csrf: sync same-origin -> 200", st == 200, f"status={st}")
 
+    # No Origin + no auth = blocked. Closes the sync bypass (curl-as-browser).
+    # Same-origin iframe and authed clients still work; unauth-local-curl needs a token.
     st, _ = http_method(port, "/home/authtest/sync", method="POST", body="no-origin")
-    test(f"{label} csrf: sync no origin -> 200", st == 200, f"status={st}")
+    test(f"{label} csrf: sync no origin no auth -> 403", st == 403, f"status={st}")
 
     # GET to mutation actions -> 405 (blocks <img src> CSRF)
     st, _ = http_get(port, "/home/authtest/sync")

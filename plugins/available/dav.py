@@ -236,9 +236,9 @@ async def handle(method, body, params):
         if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
         # Use raw bytes from params (plugin dispatch preserves them)
         raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
-        # ext comes from ?ext= query (explicit) or Content-Type header (client's
-        # own MIME hint). No parsing of URL path — the path is the name, dots
-        # are just bytes in the name. Default "plain".
+        # ext comes from (priority): ?ext= query > Content-Type header >
+        # URL path's last-segment extension. URL extension is a DAV-native
+        # hint — clients name files with ext as a MIME signal.
         ext = params.get("ext")
         if not ext:
             ct = ""
@@ -248,7 +248,16 @@ async def handle(method, body, params):
                     break
             # Reverse the server._CT table so we can go content-type → ext.
             ct_to_ext = {v: k for k, v in server._CT.items()}
-            ext = ct_to_ext.get(ct, "plain")
+            ext = ct_to_ext.get(ct, "")
+        if not ext:
+            # Fall back to URL path's last-segment extension, if it's known.
+            last_seg = path.rstrip("/").rsplit("/", 1)[-1]
+            dot = last_seg.rfind(".")
+            if dot > 0:
+                maybe_ext = last_seg[dot+1:].lower()
+                if maybe_ext in server._CT:
+                    ext = maybe_ext
+        if not ext: ext = "plain"
         if ext == "html" and server._check_auth(scope) != "approve":
             return {"error": "html write requires approve", "_status": 403}
         if name.startswith(_SYS_PREFIXES) and server._check_auth(scope) != "approve":

@@ -217,25 +217,35 @@ def _check_auth(scope):
 _db = {}
 
 def _release_world(name):
-    """Close cached sqlite connection for `name`, collect garbage, and wait
-    briefly for Windows to release file handles. Use before rename()-ing a
-    world dir out of place (DELETE, MOVE). Without this, Windows throws
-    PermissionError from lingering file handles on universe.db-wal/-shm
-    even after close() — sqlite3 cursor objects sometimes keep the handle
-    alive until gc."""
+    """Close cached sqlite connection for `name`, unlink WAL/SHM, and
+    collect garbage. Call before rename()-ing a world dir on Windows —
+    sqlite3's close() doesn't always release the WAL/SHM file handles
+    immediately, and Windows won't rename a dir containing an open file."""
     import gc, time
     if name in _db:
-        try: _db[name].execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        c = _db.pop(name)
+        try: c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception: pass
-        _db.pop(name).close()
+        try: c.rollback()
+        except Exception: pass
+        try: c.close()
+        except Exception: pass
     gc.collect()
-    # One tiny yield so the OS can process handle release before rename.
-    time.sleep(0.005)
+    # After checkpoint + close, WAL/SHM should be removable. If they're
+    # not — the handle is still stuck somewhere — we swallow the error
+    # and let the rename retry loop handle it.
+    d = DATA / _disk_name(name)
+    if d.exists():
+        for ext in ("-wal", "-shm"):
+            try: (d / f"universe.db{ext}").unlink(missing_ok=True)
+            except (OSError, PermissionError): pass
+    time.sleep(0.01)
 
 def _move_to_trash(name):
-    """Move world dir to .trash/<disk_name>. Idempotent with retries for
-    the Windows file-lock race. Call _release_world first."""
-    import shutil
+    """Move world dir to .trash/<disk_name>. 10-attempt retry loop for
+    the Windows file-handle race, then copytree+rmtree fallback. Call
+    _release_world first."""
+    import shutil, time
     src = DATA / _disk_name(name)
     if not src.exists():
         return
@@ -243,16 +253,20 @@ def _move_to_trash(name):
     trash.parent.mkdir(parents=True, exist_ok=True)
     if trash.exists():
         shutil.rmtree(trash)
-    # Try rename up to 5 times with growing backoff. If all fail, fall
-    # back to shutil.move which does copy+delete — slower, always works.
-    import time
-    for attempt in range(5):
+    last_err = None
+    for attempt in range(10):
         try:
             src.rename(trash)
             return
-        except PermissionError:
-            time.sleep(0.02 * (attempt + 1))
-    shutil.move(str(src), str(trash))
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.03 * (attempt + 1))
+    # Fallback — slower but works when rename can't win the file-lock race.
+    try:
+        shutil.copytree(str(src), str(trash))
+        shutil.rmtree(str(src), ignore_errors=True)
+    except Exception:
+        raise last_err
 
 def conn(name):
     if name not in _db:
