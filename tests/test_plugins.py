@@ -670,10 +670,14 @@ def _run_blob_ext_tests(port, label, token, approve):
     test(f"{label} blob: DAV fakedir/ has children", "child1" in body and "child2" in body, f"body={body[:100]}")
 
     # ── DAV binary PUT round-trip ──
+    # Plan C: identity on writes. DAV PUT /dav/home/foo.png creates world
+    # 'foo.png' (dots are just bytes in the name). The URL-ext fallback in
+    # dav.py's PUT handler derives ext=png from the URL's last-segment
+    # suffix since urllib sends no Content-Type.
     st, _ = http_method(port, "/dav/home/dav-bin-test.png", method="PUT", body=png_bytes, basic_auth=approve)
     test(f"{label} blob: DAV PUT binary -> 201", st == 201, f"status={st}")
 
-    st, body = http_get(port, "/home/dav-bin-test")
+    st, body = http_get(port, "/home/dav-bin-test.png")
     d = json.loads(body)
     test(f"{label} blob: DAV binary ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
     test(f"{label} blob: DAV binary stage empty (binary)", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
