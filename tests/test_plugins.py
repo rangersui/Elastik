@@ -751,6 +751,18 @@ def _run_http_tests(port, label, token="", approve=""):
     test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
          st3 in (502, 503), f"status={st3} body={body3[:80]}")
 
+    # Query-string URL-decoding regression: browsers URL-encode / as %2F
+    # when a form field value contains a slash. Before the fix, server.py
+    # hand-parsed qs without decoding → /dev/db got file="brave%2FHistory",
+    # _resolve_mnt did startswith("brave/") on "brave%2FHistory" → "file
+    # not under any fstab mount". Use /grep to probe: encode the space in
+    # "foo bar" as %20 and verify grep sees the decoded value.
+    http_method(port, "/home/qs-decode-grep", method="PUT",
+                body="line with foo bar here\nanother line", token=token)
+    st_enc, body_enc = http_get(port, "/grep?world=qs-decode-grep&q=foo%20bar")
+    test(f"{label}: qs decodes %20 to space (grep finds 'foo bar')",
+         st_enc == 200 and "foo bar" in body_enc, f"status={st_enc} body={body_enc[:80]}")
+
     # GET unknown path -> serves index.html (200).
     # Unknown GET paths are world entry points.
     st, body = http_get(port, "/proc/worlds")

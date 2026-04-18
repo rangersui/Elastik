@@ -46,6 +46,12 @@ def _csp():
             f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
             f"connect-src 'self'; worker-src 'self'")
 _INVALID_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f\\:*?"<>|]')
+
+def _parse_qs(qs):
+    """Parse a query string into {k: v}, URL-decoded. Single-value per key.
+    Browsers encode `/` as %2F in form fields — this handles that."""
+    from urllib.parse import parse_qsl
+    return dict(parse_qsl(qs, keep_blank_values=True)) if qs else {}
 def _valid_name(name):
     """Check world name: any Unicode allowed, reject control chars + Windows-illegal + traversal."""
     if not name or _INVALID_NAME_CHARS.search(name): return False
@@ -485,7 +491,7 @@ async def app(scope, receive, send):
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         b = body_raw.decode("utf-8", "replace")
         qs = scope.get("query_string", b"").decode()
-        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        params = _parse_qs(qs)
         # Man page: browser GET, no query params, handler has docstring → show form
         if method == "GET" and not qs:
             accept = ""
@@ -623,7 +629,7 @@ async def app(scope, receive, send):
         try: body = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         qs = scope.get("query_string", b"").decode()
-        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        params = _parse_qs(qs)
         # Collect shared content from query params + body
         from urllib.parse import unquote_plus as unquote
         parts = []
@@ -763,7 +769,7 @@ async def app(scope, receive, send):
             name = "/".join(parts[1:]) if parts[0] == "home" else "/".join(parts)
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         qs = scope.get("query_string", b"").decode()
-        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        params = _parse_qs(qs)
         # ── Auth gates ──
         if method in ("PUT", "POST"):
             auth = _check_auth(scope)
