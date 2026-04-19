@@ -428,12 +428,29 @@ def _match_plugin(base_path):
             best = p
     return (_plugins[best], best) if best else (None, None)
 
+MAX_URL = 8192  # URL length cap — DoS protection for the 8K–65K range.
+                # By the time the app sees scope["path"], httptools has already
+                # applied its uint16 wrap (if any), so this cap CANNOT prevent
+                # a 70 KB URL from being truncated to 4 KB — it only catches
+                # giant URLs that haven't wrapped yet. The uint16-wrap class
+                # itself is handled by architecture: routing matches prefixes
+                # (truncation chops tails, leaves /admin/ /etc/ intact), '..'
+                # is a byte-level check, and cap scope uses the same (possibly
+                # truncated) path the router uses — no smuggling. See
+                # logs/redteam_uint16.py for the full claim set and proofs.
+
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     _raw_path = scope["path"]; trailing_slash = _raw_path.endswith("/") and len(_raw_path) > 1
     path = _raw_path.rstrip("/") or "/"; method = scope["method"]
     try: print(f"  {method} {path}")
     except UnicodeEncodeError: print(f"  {method} {ascii(path)}")
+    # URL length gate — DoS cap only. Catches URLs 8K–65K; cannot catch
+    # ≥65K (those have already been uint16-wrapped by httptools by the time
+    # we get here). See MAX_URL comment above for the architectural layer.
+    raw_len = len(scope.get("raw_path", b"")) or len(_raw_path)
+    if raw_len > MAX_URL:
+        return await send_r(send, 414, '{"error":"URI too long"}')
     # Auth gate — if a plugin sets _auth, it can intercept any request.
     # Return truthy = "I sent a response" (e.g. pastebin). Falsy = proceed.
     if _auth:

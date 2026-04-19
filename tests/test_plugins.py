@@ -8,7 +8,7 @@ Usage:
   python tests/test_plugins.py cgi      # layer 1 only
   python tests/test_plugins.py python   # layer 1 + 2
 """
-import json, os, subprocess, sys, time, urllib.request, urllib.error, signal
+import json, os, socket, subprocess, sys, time, urllib.request, urllib.error, signal
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -282,6 +282,7 @@ def test_python():
         _run_http_tests(py_port, "python", token=py_token, approve=py_approve)
         _run_devtools_tests(py_port, "python", token=py_token)
         _run_flush_sse_test(py_port, "python", py_token)
+        _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -874,6 +875,106 @@ def _run_flush_sse_test(port, label, token):
     # 6. Repeatable — flush again, should re-seed and re-flush
     st, _ = http_post(port, "/flush", "", token=token)
     test(f"{label} flush: repeatable", st == 200, f"status={st}")
+
+
+def _run_uint16_redteam_tests(port, label, token, approve):
+    """Red team: httptools.parse_url uint16 wrap → scope['path'] truncation.
+
+    These attacks only apply when httptools is the HTTP backend.  uvicorn
+    falls back to h11 (pure-Python, no uint16 wrap) when httptools isn't
+    installed — skip in that case.  The test doubles as a regression guard
+    against future changes that could make a previously-architecturally-safe
+    route vulnerable (e.g. adding Host-based virtual hosting).
+    """
+    try:
+        import httptools  # noqa: F401 — presence check only
+    except ImportError:
+        skip(f"{label} uint16: httptools not installed",
+             "uvicorn fallback is h11, no uint16 wrap possible")
+        return
+
+    def _raw(method, target, tok="", body=b"", timeout=15):
+        hdr = f"{method} {target} HTTP/1.1\r\nHost: x\r\n"
+        if tok: hdr += f"Authorization: Bearer {tok}\r\n"
+        hdr += "Connection: close\r\n"
+        if body: hdr += f"Content-Length: {len(body)}\r\n"
+        req_bytes = hdr.encode() + b"\r\n" + body
+        s = socket.socket()
+        s.settimeout(timeout)
+        s.connect(("127.0.0.1", port))
+        s.sendall(req_bytes)
+        resp = b""
+        try:
+            while True:
+                chunk = s.recv(65536)
+                if not chunk: break
+                resp += chunk
+        except socket.timeout:
+            pass
+        finally:
+            s.close()
+        first = resp.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+        parts = first.split(" ", 2)
+        st = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+        body_start = resp.find(b"\r\n\r\n") + 4 if b"\r\n\r\n" in resp else len(resp)
+        return st, resp[body_start:]
+
+    PAD = "a" * 70000      # wraps to 4464
+    EXACT = "a" * 65535    # wraps to 0
+
+    # /admin/load approve-gate: prefix preserved under wrap, handler self-checks
+    st, _ = _raw("POST", f"/admin/load/{PAD}", body=b"name=devtools")
+    test(f"{label} uint16: /admin/load no-auth (70KB URL) blocked",
+         st in (401, 403, 414), f"status={st}")
+    st, _ = _raw("POST", f"/admin/load/{PAD}", token, body=b"name=devtools")
+    test(f"{label} uint16: /admin/load T2 (70KB URL) blocked",
+         st in (401, 403, 414), f"status={st}")
+
+    # /etc/* T3-write gate survives
+    st, _ = _raw("PUT", f"/etc/rt-canary/{PAD}", token, body=b"pwnd")
+    test(f"{label} uint16: /etc/* T2 write (70KB URL) blocked",
+         st in (403, 414), f"status={st}")
+
+    # '..' entry guard fires on truncated prefix
+    st, _ = _raw("GET", f"/foo/../{PAD}")
+    test(f"{label} uint16: '..' in truncated head (70KB URL) blocked",
+         st in (400, 414), f"status={st}")
+
+    # wrap-to-empty: exact-65535-a path → scope['path'] empty → routes to /
+    st, _ = _raw("GET", f"/{EXACT}")
+    test(f"{label} uint16: wrap-to-empty (exact 65535) no privileged surface",
+         st in (200, 400, 414), f"status={st}")
+
+    # 9 KB URL is in the cap window (>8192, <65535) — MAX_URL should fire 414.
+    st, _ = _raw("GET", "/" + "a" * 9000)
+    test(f"{label} uint16: 9 KB URL caps at MAX_URL -> 414", st == 414, f"status={st}")
+
+    # cap token scope: /home/scratch cap must not reach /home/other under wrap
+    st, body = _raw("POST", "/auth/mint?prefix=/home/scratch&ttl=600&mode=rw", approve)
+    if st == 200:
+        try:
+            cap = json.loads(body)["token"]
+            st, _ = _raw("PUT", f"/home/other/{PAD}", cap, body=b"pwnd")
+            test(f"{label} uint16: cap /home/scratch → /home/other (70KB URL) blocked",
+                 st in (401, 403, 404, 414), f"status={st}")
+        except (KeyError, json.JSONDecodeError) as e:
+            test(f"{label} uint16: cap mint for scope test", False, str(e))
+    else:
+        skip(f"{label} uint16: cap scope test", f"mint returned {st}")
+
+    # /auth/mint mode=r must not escalate to rw under query truncation
+    qs = f"prefix=/home/scratch&ttl=60&mode=r&padding={PAD}"
+    st, body = _raw("POST", f"/auth/mint?{qs}", approve)
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} uint16: mint mode=r preserved under query wrap",
+                 d.get("mode") == "r", f"got mode={d.get('mode')!r}")
+        except json.JSONDecodeError:
+            test(f"{label} uint16: mint response parseable", False, body[:80])
+    else:
+        test(f"{label} uint16: mint with truncated query -> 200 or 414",
+             st == 414, f"status={st}")
 
 
 # ── Main ────────────────────────────────────────────────────────────
