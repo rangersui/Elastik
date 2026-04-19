@@ -125,6 +125,58 @@ curl -X PUT localhost:3005/etc/foo  ...    # → 403
 
 chroot for LLMs. Physics, not policy.
 
+## Metadata headers
+
+`X-Meta-*` request headers travel with each PUT. Stored with the world,
+replayed on read, bound to the body via an HMAC-chained event.
+
+```bash
+curl -X PUT localhost:3005/home/findings/x \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Meta-Author: codex" \
+  -H "X-Meta-Confidence: 0.95" \
+  -H "X-Meta-Severity: high" \
+  -d "uint16 truncation in parse_url. upstream archived."
+
+# ?raw reflects metadata as response headers:
+curl -sD - -o /dev/null "localhost:3005/home/findings/x?raw"
+# → x-meta-author: codex
+#   x-meta-confidence: 0.95
+#   x-meta-severity: high
+
+# bound to content in the event log:
+curl -X POST "localhost:3005/dev/db?world=home/findings/x" \
+  -H "Authorization: Bearer $APPROVE" \
+  -d "SELECT payload FROM events ORDER BY id DESC LIMIT 1"
+# → {"op":"put", "meta_headers":[["x-meta-author","codex"],...],
+#     "body_sha256_after":"e3b0...", "version_after":1, "len":58}
+```
+
+Body is content. Header is metadata about content. Event is the
+receipt that binds both to a moment in time.
+
+Only `X-Meta-*` is stored. `Authorization`, `X-Forwarded-*`,
+`X-Accel-Redirect`, and everything else is dropped — the prefix
+whitelist keeps infrastructure-interpreted response headers out of
+the reflection path. Byte budget: 1 KB per value, 8 KB total.
+
+Scope note: POST append does **not** update metadata. The audit
+event records `meta_headers: []` for appends. Use PUT when
+authorship changes.
+
+Audit boundary: the HMAC chain covers the `events` table, not
+`stage_meta`. You get event-level binding — "this body hash matches
+what this writer claimed they wrote" — not full-state tamper-proof
+snapshot history. Direct edits to the current row cause the current
+body hash to stop matching the last event's `body_sha256_after`; a
+broken events chain means the audit log itself was tampered with.
+Two independent checks.
+
+Convention hints (not enforced, invent your own if needed):
+`X-Meta-Author`, `X-Meta-Confidence` (0.0–1.0), `X-Meta-Intent`,
+`X-Meta-Severity`, `X-Meta-Scope`, `X-Meta-Source`, `X-Meta-Model`,
+`X-Meta-Supersedes`, `X-Meta-Depends-On`.
+
 ## Connect AI
 
 Tell any AI:

@@ -260,11 +260,13 @@ def test_python():
     py_port = 13007
     py_token = "test-py-token"
     py_approve = "test-py-approve"
+    py_key = "test-audit-hmac-key"   # known to audit tests so HMAC chain can be verified end-to-end
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(py_port)
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = py_token
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
+    env["ELASTIK_KEY"] = py_key
     proc = subprocess.Popen(
         [sys.executable, "server.py"], env=env, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -284,6 +286,7 @@ def test_python():
         _run_flush_sse_test(py_port, "python", py_token)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
         _run_meta_headers_tests(py_port, "python", py_token, py_approve)
+        _run_audit_binding_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -1276,6 +1279,160 @@ def _run_meta_headers_tests(port, label, token, approve):
 
     # cleanup
     http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+
+def _run_audit_binding_tests(port, label, token, approve):
+    """Phase 2.5: every write-type event's payload carries version_after,
+    meta_headers, and body_sha256_after. Append additionally carries
+    append_len / append_sha256. HMAC chain over the expanded payload
+    still verifies. DAV PUT shares the same shape."""
+    import hashlib as _hl, sqlite3 as _sq, os as _os, hmac as _hm
+    W = "audit-test-world"
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+    def _db_path(world):
+        # home/ prefix is URL sugar — internal world name drops it. System
+        # namespaces (etc/, var/, boot/) keep their prefix. Mirrors server.py.
+        if world.startswith("home/"): world = world[5:]
+        disk = world.replace("/", "%2F")
+        return _os.path.join("data", disk, "universe.db")
+
+    def _last_event_payload(world):
+        p = _db_path(world)
+        if not _os.path.exists(p): return None
+        db = _sq.connect(p)
+        try:
+            row = db.execute(
+                "SELECT payload FROM events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            db.close()
+
+    # 1. PUT → event has version_after, meta_headers, body_sha256_after, op
+    body = "hello-audit"
+    http_method(port, f"/home/{W}", method="PUT", body=body, token=token,
+                headers={"X-Meta-Author": "codex"})
+    p = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: PUT event has op=put",
+         p and p.get("op") == "put", f"payload={p}")
+    test(f"{label} audit: PUT event version_after is int",
+         p and isinstance(p.get("version_after"), int) and p["version_after"] >= 1,
+         f"ver={p.get('version_after')}")
+    test(f"{label} audit: PUT event meta_headers preserved",
+         p and p.get("meta_headers") == [["x-meta-author", "codex"]],
+         f"meta={p.get('meta_headers')}")
+    expected_hash = _hl.sha256(body.encode()).hexdigest()
+    test(f"{label} audit: PUT event body_sha256_after correct",
+         p and p.get("body_sha256_after") == expected_hash,
+         f"got={p.get('body_sha256_after')[:16] if p else None}... expected={expected_hash[:16]}...")
+
+    # 2. POST append → event has op=append, append_sha256, version_after, body_sha256_after
+    append_body = " more"
+    http_method(port, f"/home/{W}", method="POST", body=append_body, token=token)
+    p2 = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: append event has op=append",
+         p2 and p2.get("op") == "append", f"payload={p2}")
+    test(f"{label} audit: append_sha256 matches delta",
+         p2 and p2.get("append_sha256") == _hl.sha256(append_body.encode()).hexdigest(),
+         f"got={p2.get('append_sha256')[:16] if p2 else None}...")
+    test(f"{label} audit: append version_after = prev+1",
+         p2 and p2.get("version_after") == p["version_after"] + 1,
+         f"prev={p['version_after']} after={p2.get('version_after') if p2 else None}")
+    test(f"{label} audit: append body_sha256_after = sha256(prev+append)",
+         p2 and p2.get("body_sha256_after") == _hl.sha256((body + append_body).encode()).hexdigest(),
+         f"got={p2.get('body_sha256_after')[:16] if p2 else None}...")
+    test(f"{label} audit: append meta_headers is empty []",
+         p2 and p2.get("meta_headers") == [], f"meta={p2.get('meta_headers')}")
+
+    # 3. HMAC chain verifies end-to-end — recompute with the known KEY
+    # and compare against stored hmac. A stubbed HMAC impl that just
+    # chains values would pass a linkage-only check; recomputing catches it.
+    #
+    # The test subprocess was started with ELASTIK_KEY="test-audit-hmac-key"
+    # (see test_python env setup). Mirrors server.log_event exactly:
+    #     hmac = sha256(KEY, (prev_hmac + payload_json_str).encode())
+    KEY = b"test-audit-hmac-key"
+    dbp = _db_path(f"home/{W}")
+    if _os.path.exists(dbp):
+        db = _sq.connect(dbp)
+        try:
+            rows = db.execute(
+                "SELECT id, payload, hmac, prev_hmac FROM events ORDER BY id"
+            ).fetchall()
+            linkage_ok = True
+            last_hmac = ""
+            recompute_ok = True
+            for _id, _pl, _h, _ph in rows:
+                if _ph != last_hmac:
+                    linkage_ok = False
+                    break
+                expected = _hm.new(KEY, (_ph + _pl).encode("utf-8"),
+                                   _hl.sha256).hexdigest()
+                if expected != _h:
+                    recompute_ok = False
+                    break
+                last_hmac = _h
+            test(f"{label} audit: HMAC chain prev_hmac linkage holds",
+                 linkage_ok, f"rows={len(rows)}")
+            test(f"{label} audit: HMAC recomputes to stored value (key-aware)",
+                 recompute_ok, f"rows={len(rows)}")
+        finally:
+            db.close()
+
+    # 4. Current body hash matches last event's body_sha256_after
+    st, body_raw = http_get(port, f"/home/{W}?raw")
+    current_hash = _hl.sha256(body_raw.encode() if isinstance(body_raw, str) else body_raw).hexdigest()
+    p3 = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: current body matches last event's body_sha256_after",
+         p3 and p3.get("body_sha256_after") == current_hash,
+         f"current={current_hash[:16]}... last={p3.get('body_sha256_after')[:16] if p3 else None}...")
+
+    # 5. Internal ops (/sync) do NOT emit events — sanity-check the contract
+    dbp = _db_path(f"home/{W}")
+    db = _sq.connect(dbp)
+    events_before = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
+    http_method(port, f"/home/{W}/sync", method="POST", body="sync-payload",
+                token=token, headers={"X-Meta-Author": "mallory"})
+    db = _sq.connect(dbp)
+    events_after = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
+    test(f"{label} audit: /sync does NOT emit audit events",
+         events_before == events_after,
+         f"before={events_before} after={events_after}")
+
+    # 5b. Non-ASCII byte-length: "你好" = 2 codepoints, 6 UTF-8 bytes.
+    # `len` and `body_sha256_after` must both describe the same byte
+    # string. Before the P2 fix, core PUT logged len=2 (str codepoints)
+    # while DAV logged len=6 (already-bytes), making cross-surface
+    # size checks inconsistent.
+    http_method(port, f"/home/{W}", method="PUT", body="你好", token=token)
+    pu = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: non-ASCII core PUT len is byte count (6, not 2)",
+         pu and pu.get("len") == 6, f"len={pu.get('len') if pu else None}")
+    test(f"{label} audit: non-ASCII core PUT hash over same bytes",
+         pu and pu.get("body_sha256_after") == _hl.sha256("你好".encode("utf-8")).hexdigest(),
+         f"hash={pu.get('body_sha256_after')[:16] if pu else None}...")
+
+    # 6. DAV PUT → same event shape as core PUT (option B convergence)
+    DW = "audit-dav-test-world"
+    http_method(port, f"/home/{DW}", method="DELETE", token=approve)
+    http_method(port, f"/dav/home/{DW}", method="PUT", body="dav-body",
+                basic_auth=approve, headers={"X-Meta-Author": "dav-client"})
+    pd = _last_event_payload(f"home/{DW}")
+    test(f"{label} audit: DAV PUT event has op=put",
+         pd and pd.get("op") == "put", f"payload={pd}")
+    test(f"{label} audit: DAV PUT event meta_headers preserved",
+         pd and pd.get("meta_headers") == [["x-meta-author", "dav-client"]],
+         f"meta={pd.get('meta_headers') if pd else None}")
+    test(f"{label} audit: DAV PUT event body_sha256_after correct",
+         pd and pd.get("body_sha256_after") == _hl.sha256(b"dav-body").hexdigest(),
+         f"hash={pd.get('body_sha256_after')[:16] if pd else None}...")
+
+    # cleanup
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+    http_method(port, f"/home/{DW}", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────

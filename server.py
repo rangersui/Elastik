@@ -980,8 +980,26 @@ async def app(scope, receive, send):
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
             hdrs = _extract_meta_headers(scope)
             c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs)); c.commit()
-            log_event(name, "stage_written", {"len": len(b), "ext": new_ext})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "ext": new_ext, "type": new_ext}))
+            # Phase 2.5 audit binding: bind metadata to content at event time.
+            # Version + body hash + meta_headers go into the HMAC-chained
+            # payload so the claim ("codex wrote this, confidence 0.95")
+            # cannot be separated from the content it covers.
+            # len + sha256 both measured over the UTF-8-encoded bytes — so
+            # PUT "你好" (2 codepoints, 6 bytes) and DAV PUT of the same body
+            # agree on len=6 and on the hash. Python's len(str) counts code
+            # points, which would lie for non-ASCII if we used it directly.
+            ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+            body_bytes_for_hash = b if isinstance(b, bytes) else b.encode("utf-8")
+            body_hash = hashlib.sha256(body_bytes_for_hash).hexdigest()
+            log_event(name, "stage_written", {
+                "op": "put",
+                "len": len(body_bytes_for_hash),
+                "ext": new_ext,
+                "version_after": ver,
+                "meta_headers": json.loads(hdrs or "[]"),
+                "body_sha256_after": body_hash,
+            })
+            return await send_r(send, 200, json.dumps({"version": ver, "ext": new_ext, "type": new_ext}))
         # ── POST: append or internal op ──
         if method == "POST":
             c = conn(name)
@@ -1010,9 +1028,30 @@ async def app(scope, receive, send):
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
             if (cur_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
+            # Measure the delta over its byte representation — same metric
+            # the hash uses — so append_len is unambiguous across text and
+            # binary payloads.
+            append_bytes_for_hash = b if isinstance(b, bytes) else b.encode("utf-8")
+            append_hash = hashlib.sha256(append_bytes_for_hash).hexdigest()
             c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            log_event(name, "stage_appended", {"len": len(b)})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
+            # Phase 2.5 audit binding: append-level provenance.
+            # append_sha256 pins the delta; body_sha256_after pins the resulting
+            # full state. meta_headers is intentionally empty — append does not
+            # update metadata (Phase 1 contract), and the event makes that visible.
+            r2 = c.execute("SELECT stage_html,version FROM stage_meta WHERE id=1").fetchone()
+            full = r2["stage_html"]
+            if isinstance(full, str): full = full.encode("utf-8")
+            full = full or b""
+            body_hash = hashlib.sha256(full).hexdigest()
+            log_event(name, "stage_appended", {
+                "op": "append",
+                "append_len": len(append_bytes_for_hash),
+                "append_sha256": append_hash,
+                "version_after": r2["version"],
+                "body_sha256_after": body_hash,
+                "meta_headers": [],
+            })
+            return await send_r(send, 200, json.dumps({"version": r2["version"]}))
 
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
