@@ -202,8 +202,9 @@ for HTTP/1.1. We reported an upstream `parse_url()` truncation bug as
 [MagicStack/httptools#142](https://github.com/MagicStack/httptools/issues/142).
 
 elastik on `_mini_serve` avoids that code path entirely. Under uvicorn,
-elastik still keeps conservative path handling and an 8 KB URL cap for
-ordinary oversized requests.
+elastik forces `http="h11"` to avoid it there too. It still keeps
+conservative path handling and an 8 KB URL cap for ordinary oversized
+requests.
 
 ---
 

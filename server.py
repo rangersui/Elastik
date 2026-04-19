@@ -1033,7 +1033,13 @@ def run(extra_tasks=None):
     try:
         import uvicorn
         async def _serve():
-            config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
+            # http="h11" forces uvicorn's pure-Python HTTP parser, avoiding
+            # httptools.parse_url()'s uint16 URL-field wrap (MagicStack/
+            # httptools#142). h11 has looser grammar in places but none of
+            # elastik's surfaces consume the semantics those attacks need
+            # (no Host routing, no http_version branching, no front proxy).
+            config = uvicorn.Config(app, host=HOST, port=PORT,
+                                    log_level="warning", http="h11")
             server = uvicorn.Server(config)
             await asyncio.gather(server.serve(), *tasks)
         asyncio.run(_serve())
