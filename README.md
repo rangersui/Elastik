@@ -183,6 +183,27 @@ python tests/boot.py
 curl -s "localhost:3005/home/boot?raw" | python -X utf8 -
 ```
 
+## Introspection
+
+Snapshot a machine into durable worlds with one command:
+
+```bash
+# If AUTH_TOKEN is configured (default via .env.example), export it first:
+ELASTIK_TOKEN=your-t2-token bash examples/introspect.sh   # writes /home/env/{os,disk,...}
+curl localhost:3005/home/env/                             # list
+curl localhost:3005/home/env/processes?raw                # read content
+```
+
+`ps` output becomes addressable. Useful for remote diagnostics without
+SSH, AI agents that want persistent self-knowledge across sessions,
+and `diff`ing environment state over time (each write bumps the
+world's version).
+
+What gets stored: `ps -eo user,pid,pcpu,pmem,comm` — command *names*
+plus basic stats (user, pid, %cpu, %mem). No argv, so secrets passed
+on the command line are **not** persisted. Edit the script to use
+`ps aux` if you want full argv (and accept that trade-off).
+
 ## Self-replication
 
 ```bash
