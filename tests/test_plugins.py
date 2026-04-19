@@ -763,6 +763,32 @@ def _run_http_tests(port, label, token="", approve=""):
     test(f"{label}: qs decodes %20 to space (grep finds 'foo bar')",
          st_enc == 200 and "foo bar" in body_enc, f"status={st_enc} body={body_enc[:80]}")
 
+    # /fetch — stdlib urllib.request, no curl subprocess. Protocol guard
+    # (only http/https) + urllib natively refuses file:// redirects.
+    st, _ = http_get(port, "/fetch")
+    test(f"{label}: /fetch no url -> 400", st == 400, f"status={st}")
+
+    st, _ = http_get(port, "/fetch?url=file:///etc/hosts")
+    test(f"{label}: /fetch file:// blocked at entry -> 400", st == 400, f"status={st}")
+
+    st, _ = http_get(port, "/fetch?url=ftp://example.com/foo")
+    test(f"{label}: /fetch ftp:// blocked at entry -> 400", st == 400, f"status={st}")
+
+    # argv-injection defense holds even with no subprocess — the scheme
+    # check would refuse a leading '-' too.
+    st, _ = http_get(port, "/fetch?url=-K/etc/passwd")
+    test(f"{label}: /fetch leading '-' blocked -> 400", st == 400, f"status={st}")
+
+    # Real fetch against our own elastik server (localhost, guaranteed up).
+    st, body = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/proc/worlds")
+    test(f"{label}: /fetch localhost http -> 200", st == 200, f"status={st}")
+    test(f"{label}: /fetch body looks like JSON array",
+         body.startswith("[") and body.rstrip().endswith("]"), f"body={body[:60]}")
+
+    # HTTPError pass-through: fetch a known 404 upstream, expect 404 back.
+    st, _ = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/home/nope-does-not-exist")
+    test(f"{label}: /fetch upstream 404 -> 404 passthrough", st == 404, f"status={st}")
+
     # GET unknown path -> serves index.html (200).
     # Unknown GET paths are world entry points.
     st, body = http_get(port, "/proc/worlds")

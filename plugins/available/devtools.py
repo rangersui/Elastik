@@ -1184,13 +1184,44 @@ async def handle_eclipse(method, body, params):
 
 
 async def handle_fetch(method, body, params):
-    """/fetch?url=https://example.com — GET a URL via curl, return body."""
+    """GET /fetch?url=https://example.com — fetch a URL, return body.
+
+    Pure stdlib urllib.request — no curl subprocess, no argv surface,
+    no external binary needed. urllib refuses foreign schemes like
+    file:// outright (URLError), so an attacker can't 302-redirect
+    us into reading local files.
+
+    Limits: 30s timeout, 10 MB body cap, http/https only. The blocking
+    I/O runs on a worker thread — handler stays cooperative so a
+    /fetch against localhost can't deadlock the event loop.
+
+    Returns the raw body with the upstream Content-Type preserved.
+    HTTP errors (4xx/5xx) pass through with the response body.
+    """
+    import asyncio, urllib.request, urllib.error
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
     if not url or not url.startswith(("http://", "https://")):
         return {"error": "?url= required (http/https)", "_status": 400}
-    r = subprocess.run(["curl", "-s", "-L", "-m", "30", url], capture_output=True, timeout=35)
-    return {"_html": r.stdout.decode("utf-8", "replace"), "_status": 200}
+
+    def _do():
+        req = urllib.request.Request(url, headers={"User-Agent": "elastik/4.1"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(10 * 1024 * 1024)  # 10 MB cap
+                ct = r.headers.get("Content-Type", "application/octet-stream")
+                return {"_body": data, "_ct": ct, "_status": r.status}
+        except urllib.error.HTTPError as e:
+            try: eb = e.read()[:100_000]
+            except Exception: eb = b""
+            ct = e.headers.get("Content-Type", "text/plain") if e.headers else "text/plain"
+            return {"_body": eb, "_ct": ct, "_status": e.code}
+        except urllib.error.URLError as e:
+            return {"error": f"URLError: {e.reason}", "_status": 502}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}", "_status": 502}
+
+    return await asyncio.to_thread(_do)
 
 
 ROUTES = {
