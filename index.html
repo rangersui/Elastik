@@ -70,5 +70,5 @@ function _startPoll(){if(_pt)return;if(_sseTimer){clearTimeout(_sseTimer);_sseTi
 async function _bootstrap(){try{const _d=await _fetchSnap('/'+p);if(_d)apply(_d)}catch(e){console.warn('elastik bootstrap:',e)}}
 function _markSseHealthy(){_sseSeen=true;if(_sseTimer){clearTimeout(_sseTimer);_sseTimer=null}_stopPoll()}
 _bootstrap();
-try{_es=new EventSource('/stream/'+w);_sseTimer=setTimeout(()=>{if(!_sseSeen)_startPoll()},1500);_es.addEventListener('update',e=>{_markSseHealthy();apply(JSON.parse(e.data))});_es.onerror=()=>{_startPoll()}}catch(e){_startPoll()}}
+try{_es=new EventSource('/stream/'+w);_sseTimer=setTimeout(()=>{if(!_sseSeen)_startPoll()},1500);_es.addEventListener('update',e=>{_markSseHealthy();apply(JSON.parse(e.data))});_es.onerror=()=>{if(_es&&_es.readyState===EventSource.CLOSED){_es=null;_startPoll()}}}catch(e){_startPoll()}}
 </script></body></html>
