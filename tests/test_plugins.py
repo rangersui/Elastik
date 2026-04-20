@@ -2002,18 +2002,20 @@ def _run_lib_tests(port, label, token, approve):
     http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
 
     # 17. Name collision with Tier 0 plugin → 422
-    # (Tier 0 plugins loaded from plugins/*.py — if there's a plugin
-    # named 'info' at _plugin_meta level, can't activate /lib/info.)
-    # Using 'info' because it's in the defaults set.
-    http_method(port, f"/lib/info", method="DELETE", token=approve)
-    http_method(port, f"/lib/info", method="PUT",
+    # Tier 0 = disk-resident plugin installed from plugins/*.py at boot.
+    # 'admin' is the remaining Tier 0 default (info was cut in the
+    # microkernel v4.4 work; public_gate was inlined). Trying to
+    # activate /lib/admin must refuse so it cannot displace the Tier 0
+    # admin that's already in _plugin_meta.
+    http_method(port, f"/lib/admin", method="DELETE", token=approve)
+    http_method(port, f"/lib/admin", method="PUT",
                 body="ROUTES = []\nasync def handle(m,b,p): return {}\n",
                 token=token)
-    st, body = http_method(port, f"/lib/info/state", method="PUT",
+    st, body = http_method(port, f"/lib/admin/state", method="PUT",
                            body="active", basic_auth=approve)
     test(f"{label} lib: Tier-0 name collision refused -> 422",
          st == 422, f"status={st}")
-    http_method(port, f"/lib/info", method="DELETE", token=approve)
+    http_method(port, f"/lib/admin", method="DELETE", token=approve)
 
     # 18. Disable removes the route from runtime (check via /bin listing)
     st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
