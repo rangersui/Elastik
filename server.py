@@ -1067,13 +1067,25 @@ async def app(scope, receive, send):
             else:
                 b = body_bytes.decode("utf-8", "replace")
                 b = _extract(b, "write")
-            cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
+            cur = c.execute("SELECT ext,state FROM stage_meta WHERE id=1").fetchone()
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
+            # Plugin-as-world: source-changing PUT on /lib/* invalidates
+            # prior approval. If state was 'active' or 'disabled', reset to
+            # 'pending' — approval is bound to a specific source version
+            # (body_sha256_after in the stage_written event), not to the
+            # plugin name. T2 caller cannot silently swap in new code
+            # under an existing T3 approval.
+            is_lib = name.startswith("lib/")
+            prev_state = ((cur["state"] if cur else "pending") or "pending") if is_lib else None
             new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
             if (cur_ext == "html" or new_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
             hdrs = _extract_meta_headers(scope)
-            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs)); c.commit()
+            if is_lib and prev_state != "pending":
+                c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,state='pending',version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs))
+            else:
+                c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs))
+            c.commit()
             # Phase 2.5 audit binding: bind metadata to content at event time.
             # Version + body hash + meta_headers go into the HMAC-chained
             # payload so the claim ("codex wrote this, confidence 0.95")
@@ -1093,6 +1105,14 @@ async def app(scope, receive, send):
                 "meta_headers": json.loads(hdrs or "[]"),
                 "body_sha256_after": body_hash,
             })
+            # If this was a /lib/* PUT that reset state, record the
+            # forced transition on the chain after the stage_written
+            # event so "source replaced, approval invalidated" is
+            # independently auditable from "source written".
+            if is_lib and prev_state and prev_state != "pending":
+                log_event(name, "state_transition", {
+                    "from": prev_state, "to": "pending",
+                    "version": ver, "reason": "source replaced"})
             return await send_r(send, 200, json.dumps({"version": ver, "ext": new_ext, "type": new_ext}))
         # ── POST: append or internal op ──
         if method == "POST":

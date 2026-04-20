@@ -1803,6 +1803,63 @@ def _run_lib_tests(port, label, token, approve):
     test(f"{label} lib: state transition on missing plugin -> 404",
          st == 404, f"status={st}")
 
+    # 12a. Source-changing PUT resets approval (Codex P1 fix). An
+    # active plugin that gets re-PUT'd by T2 must drop back to
+    # state='pending'; else T2 could silently swap code under an
+    # existing T3 approval.
+    W2 = "lib-approval-reset-test"
+    http_method(port, f"/lib/{W2}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v1", token=token)
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="active",
+                basic_auth=approve)
+    _, body_mid = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — activated state=active",
+         json.loads(body_mid).get("state") == "active",
+         f"state={json.loads(body_mid).get('state')!r}")
+    # T2 replaces source — must reset to pending
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v2 evil", token=token)
+    _, body_after = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — active -> pending after T2 PUT",
+         json.loads(body_after).get("state") == "pending",
+         f"state={json.loads(body_after).get('state')!r}")
+
+    # 12b. Same rule for disabled plugins — re-PUT goes back to pending,
+    # so re-approval is explicit.
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="active",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="disabled",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v3", token=token)
+    _, body_after2 = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — disabled -> pending after T2 PUT",
+         json.loads(body_after2).get("state") == "pending",
+         f"state={json.loads(body_after2).get('state')!r}")
+
+    # 12c. Forced reset is audited — state_transition event with
+    # reason='source replaced' lands on the chain right after the
+    # stage_written event.
+    import sqlite3 as _sq2, os as _os2
+    db2 = _os2.path.join("data", "lib%2F" + W2, "universe.db")
+    if _os2.path.exists(db2):
+        conn2 = _sq2.connect(db2)
+        try:
+            rows = conn2.execute(
+                "SELECT event_type, payload FROM events ORDER BY id DESC LIMIT 4"
+            ).fetchall()
+        finally:
+            conn2.close()
+        # Look for a state_transition with reason="source replaced"
+        has_forced_reset = any(
+            r[0] == "state_transition" and '"source replaced"' in (r[1] or "")
+            for r in rows
+        )
+        test(f"{label} lib: approval-reset — audit records forced reset",
+             has_forced_reset,
+             f"recent events types={[r[0] for r in rows]}")
+
+    # cleanup for 12a/b/c
+    http_method(port, f"/lib/{W2}", method="DELETE", token=approve)
+
     # 13. Audit chain — state_transition events recorded.
     # Read sqlite directly (same pattern as _run_audit_binding_tests);
     # /dev/db would need to fight the server's WAL-mode connection for
