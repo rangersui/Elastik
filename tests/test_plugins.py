@@ -268,8 +268,14 @@ def test_python():
     # Let public_gate tests impersonate a non-localhost client by sending
     # X-Forwarded-For (regression for the cloudflared-tunnel white-screen
     # bug — app shell resources fetched anonymously by the browser).
+    # Trust both v4 AND v6 loopback as the "proxy" — CI runners (notably
+    # ubuntu + newer macOS) connect urllib→uvicorn over ::1, and scope
+    # ["client"][0] shows up as "::1"; 127.0.0.0/8 alone doesn't cover it
+    # and auth_gate then treats the request as local and bypasses. The
+    # cookie-free public gate has only Authorization to lean on, so the
+    # test rig must admit both loopback families.
     env["ELASTIK_TRUST_PROXY_HEADER"] = "x-forwarded-for"
-    env["ELASTIK_TRUST_PROXY_FROM"] = "127.0.0.0/8"
+    env["ELASTIK_TRUST_PROXY_FROM"] = "127.0.0.0/8,::1/128"
     proc = subprocess.Popen(
         [sys.executable, "server.py"], env=env, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
