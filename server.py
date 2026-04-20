@@ -65,24 +65,6 @@ def _disk_name(name):
 def _logical_name(disk):
     """Filesystem dir name → world name. %2F → /."""
     return disk.replace("%2F", "/")
-def _find_lib_disk_collisions(root):
-    """Return sorted list of plugin names that exist BOTH as plugins/<n>.py
-    AND as data/lib%2F<n>/ worlds. Used by boot to refuse start on
-    ambiguous migration state — see main block for the exit logic."""
-    disk_names = set()
-    plugins_dir = Path(root) / "plugins"
-    if plugins_dir.exists():
-        for f in plugins_dir.glob("*.py"):
-            if not f.name.startswith("_"):
-                disk_names.add(f.stem)
-    lib_names = set()
-    data_dir = Path(root) / "data"
-    if data_dir.exists():
-        for d in data_dir.iterdir():
-            if d.is_dir() and (d / "universe.db").exists():
-                if d.name.startswith("lib%2F"):
-                    lib_names.add(d.name[len("lib%2F"):])
-    return sorted(disk_names & lib_names)
 _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/plain",
        "css":"text/css","js":"text/javascript","json":"application/json",
        "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
@@ -1415,30 +1397,19 @@ def run(extra_tasks=None):
             await asyncio.gather(_mini_serve(app, HOST, PORT), *tasks)
         asyncio.run(_serve())
 
-def _sync_dir(directory, glob_pattern, world_name_fn, label):
-    """Sync files from a directory to worlds at startup."""
-    d = Path(__file__).resolve().parent / directory
-    if not d.exists(): return
-    for f in sorted(d.glob(glob_pattern)):
-        name = world_name_fn(f)
-        content = f.read_text(encoding="utf-8")
-        c = conn(name)
-        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-        if old["stage_html"] != content:
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
-            c.commit()
-            print(f"  {label}: synced {name}")
-
-
 # ──────────────────────────────────────────────────────────────────────
-# Plugin subsystem — inlined from the former plugins.py in the v4.5.0
-# microkernel cut. Covers disk loading (Tier 0), world loading (Tier 1
-# via /lib/*), cron scheduling, and the plugin-propose/approve flow.
+# Plugin subsystem — Tier 1 (/lib/*) only, v4.5.0 microkernel cut.
+# World loader (load_plugin_from_source), activation lifecycle
+# (activate_lib_world / deactivate_lib_world), boot loader
+# (boot_load_active_lib), cron scheduler (cron_loop), and the
+# AI plugin-propose/approve flow (rewired to /lib/*).
+#
+# Disk-based Tier 0 loading was removed: no more load_plugin(),
+# load_plugins(), plugins.lock, _verify_plugin, _find_lib_disk_collisions,
+# plugins/available/ scan, plugins/ auto-install. The runtime reads
+# /lib/<name> worlds from DATA and nothing from the filesystem.
 # ──────────────────────────────────────────────────────────────────────
 
-PLUGINS = Path("plugins")
-_LOCK = Path(__file__).resolve().parent / "plugins.lock"
-_lock_hashes = {}  # rel_path → expected sha256, loaded once
 _DANGEROUS_PLUGINS = {"exec", "fs"}
 _cron_tasks = {}   # name → {interval, handler, last_run}
 _start_time = time.time()
@@ -1451,113 +1422,6 @@ _USER_MODE = int(os.getenv("ELASTIK_MODE", "0"))  # 0 = auto
 MODE = min(_USER_MODE, _ENV_CEILING) if _USER_MODE else _ENV_CEILING
 # MODE 1: executor  — read/write worlds, use plugins. admin/config/dangerous locked.
 # MODE 2: autonomous — approve token unlocks admin/config. dangerous plugins allowed.
-
-
-def _load_lock():
-    """Parse plugins.lock once into memory."""
-    if _lock_hashes or not _LOCK.exists(): return
-    for line in _LOCK.read_text(encoding="utf-8").strip().splitlines():
-        if not line.strip(): continue
-        h, rel = line.split("  ", 1)
-        _lock_hashes[rel] = h
-
-
-def _verify_plugin(path):
-    """Check a file against plugins.lock. No lock file = pass."""
-    _load_lock()
-    if not _lock_hashes: return True  # no lock = first run
-    rel = path.resolve().relative_to(Path(__file__).resolve().parent).as_posix()
-    expected = _lock_hashes.get(rel)
-    if not expected: return True  # not in lock = user-added, pass
-    actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    return actual == expected
-
-
-def load_plugin(name):
-    """Load or reload a single Tier 0 (disk) plugin by name.
-    Returns True on success."""
-    if not _valid_name(name):
-        print(f"  rejected invalid plugin name: {name}"); return False
-    if name in _DANGEROUS_PLUGINS and MODE < 2:
-        print(f"  ! {name} blocked -- mode {MODE} (need mode 2 = container)"); return False
-    f = PLUGINS / f"{name}.py"
-    src = PLUGINS / "available" / f"{name}.py"
-    if src.exists():
-        # Verify against lock before trusting available/ source
-        if not _verify_plugin(src):
-            print(f"  ! {name} blocked -- checksum mismatch in plugins.lock"); return False
-        PLUGINS.mkdir(exist_ok=True)
-        new_text = src.read_text(encoding="utf-8")
-        old_text = f.read_text(encoding="utf-8") if f.exists() else ""
-        if new_text != old_text:
-            f.write_text(new_text, encoding="utf-8")
-            print(f"  updated from available: {name}")
-    elif not f.exists():
-        print(f"  not found: {name}"); return False
-    try:
-        async def _call(route, method="POST", body=b"", params=None):
-            h = _plugins.get(route)
-            if not h: return {"error": f"route {route} not found"}
-            return await h(method, body, params or {})
-        _injectable = {
-            "load_plugin": load_plugin, "unload_plugin": unload_plugin,
-            "_plugins": _plugins, "_plugin_meta": _plugin_meta,
-            "_cron_tasks": _cron_tasks, "_start_time": _start_time,
-        }
-        ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent,
-              "conn": conn, "log_event": log_event, "_call": _call}
-        text = f.read_text(encoding="utf-8")
-        needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', text)
-        if needs_match:
-            needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
-            ns.update({k: _injectable[k] for k in needed if k in _injectable})
-        exec(text, ns)
-        # Remove old routes for this plugin
-        old = next((m for m in _plugin_meta if m["name"] == name), None)
-        if old:
-            for r in old["routes"]:
-                _plugins.pop(r, None)
-                _plugin_auth.pop(r, None)
-            _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
-        # Register new routes — two forms:
-        #   v1 spec: ROUTES = ["/path"] + async def handle(...)  (new plugins)
-        #   v0:      ROUTES = {"/path": handler}                 (old plugins, still supported)
-        raw_routes = ns.get("ROUTES", {})
-        auth_level = ns.get("AUTH", "none")
-        routes = []
-        if isinstance(raw_routes, list):
-            h = ns.get("handle")
-            if not h: raise ValueError(f"plugin {name} declares ROUTES as list but has no handle() function")
-            for p in raw_routes:
-                _plugins[p] = h
-                _plugin_auth[p] = auth_level
-                routes.append(p)
-        elif isinstance(raw_routes, dict):
-            for p, h in raw_routes.items():
-                _plugins[p] = h
-                _plugin_auth[p] = auth_level
-                routes.append(p)
-        if "AUTH_MIDDLEWARE" in ns:
-            global _auth
-            _auth = ns["AUTH_MIDDLEWARE"]
-        _plugin_meta.append({"name": name, "description": ns.get("DESCRIPTION", ""),
-            "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])})
-        # Auto-create skills world from plugin SKILL field
-        skill_doc = ns.get("SKILL", "")
-        if skill_doc:
-            c = conn(f"usr/lib/skills/{name.replace('_', '-')}")
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
-            c.commit()
-            print(f"  skill: usr/lib/skills/{name.replace('_', '-')}")
-        # Auto-register cron task
-        if "CRON" in ns and "CRON_HANDLER" in ns:
-            _cron_tasks[name] = {"interval": int(ns["CRON"]), "handler": ns["CRON_HANDLER"], "last_run": time.time()}
-            print(f"  cron: {name} every {ns['CRON']}s")
-        print(f"  loaded: {name} ({routes})")
-        return True
-    except Exception as e:
-        print(f"  error loading {name}: {e}")
-        return False
 
 
 def unload_plugin(name):
@@ -1605,7 +1469,7 @@ def load_plugin_from_source(plugin_name, source):
         if not h: return {"error": f"route {route} not found"}
         return await h(method, body, params or {})
     _injectable = {
-        "load_plugin": load_plugin, "unload_plugin": unload_plugin,
+        "unload_plugin": unload_plugin,
         "_plugins": _plugins, "_plugin_meta": _plugin_meta,
         "_cron_tasks": _cron_tasks, "_start_time": _start_time,
     }
@@ -1726,20 +1590,6 @@ def boot_load_active_lib():
         print(f"  lib: {loaded} loaded, {failed} failed")
 
 
-def _sync_actions_add(name):
-    """Register a plugin's routes in etc/actions whitelist."""
-    meta = next((m for m in _plugin_meta if m["name"] == name), None)
-    if not meta or not meta["routes"]: return
-    c = conn("etc/actions")
-    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-    existing = set(l.strip() for l in old.splitlines() if l.strip())
-    added = [r for r in meta["routes"] if r not in existing]
-    if added:
-        new = old.rstrip("\n") + "\n" + "\n".join(added) + "\n" if old.strip() else "\n".join(added) + "\n"
-        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (new,))
-        c.commit()
-
-
 def _sync_actions_remove(name, routes):
     """Remove a plugin's routes from etc/actions whitelist."""
     if not routes: return
@@ -1754,25 +1604,11 @@ def _sync_actions_remove(name, routes):
     except Exception as e: print(f"  warn: actions cleanup failed: {e}")
 
 
-def load_plugins():
-    """Load all Tier 0 plugins at startup. Install defaults if empty."""
-    installed = [f for f in PLUGINS.glob("*.py") if not f.name.startswith("_")] if PLUGINS.exists() else []
-    if not installed:
-        available = PLUGINS / "available"
-        if available.exists():
-            PLUGINS.mkdir(exist_ok=True)
-            for name in ["admin.py"]:
-                src = available / name
-                if src.exists():
-                    (PLUGINS / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-                    print(f"  installed default: {name}")
-    if not PLUGINS.exists(): return
-    for f in PLUGINS.glob("*.py"):
-        if not f.name.startswith("_"): load_plugin(f.stem)
-
-
 async def handle_propose(method, body, params):
-    """POST /plugins/propose — submit a plugin proposal."""
+    """POST /plugins/propose — submit a plugin proposal (AI → operator review).
+    Appends the proposal to the plugin-proposals world. Operator then
+    reviews and, if approved, POSTs to /plugins/approve which PUTs the
+    source into /lib/<name> and activates it."""
     try: b = json.loads(body)
     except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
     log_event("default", "plugin_proposed", b)
@@ -1788,7 +1624,13 @@ async def handle_propose(method, body, params):
 
 
 async def handle_approve(method, body, params):
-    """POST /plugins/approve — approve and install a plugin (requires approve)."""
+    """POST /plugins/approve — approve and install a plugin as /lib/<name>
+    (requires approve). Writes source to the /lib/<name> world with
+    state='pending', then activates via activate_lib_world (which execs
+    and registers routes). Flips state to 'active' on successful load.
+
+    Rewired for the v4.5.0 microkernel cut: no longer writes to disk.
+    The disk-based load_plugin() is gone; /lib/* is the only loader."""
     try: b = json.loads(body)
     except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
     scope = params.get("_scope", {})
@@ -1798,9 +1640,20 @@ async def handle_approve(method, body, params):
     if n and not _valid_name(n):
         return {"error": "invalid plugin name", "_status": 400}
     if n and code:
-        PLUGINS.mkdir(exist_ok=True)
-        (PLUGINS / f"{n}.py").write_text(code)
-        load_plugin(n); _sync_actions_add(n)
+        world_name = f"lib/{n}"
+        c = conn(world_name)
+        c.execute(
+            "UPDATE stage_meta SET stage_html=?,state='pending',"
+            "version=version+1,updated_at=datetime('now') WHERE id=1",
+            (code,),
+        )
+        c.commit()
+        ok, err = activate_lib_world(n)
+        if not ok:
+            log_event("default", "plugin_approve_failed", {"name": n, "error": err})
+            return {"error": f"activation failed: {err}", "_status": 500}
+        c.execute("UPDATE stage_meta SET state='active' WHERE id=1")
+        c.commit()
         log_event("default", "plugin_approved", {"name": n})
     return {"ok": True}
 
@@ -2281,39 +2134,13 @@ if __name__ == "__main__":
     _root = Path(__file__).resolve().parent
     os.environ.setdefault("ELASTIK_DATA", str(_root / "data"))
     os.environ.setdefault("ELASTIK_ROOT", str(_root))
-    # Plugin-as-world boot safety: refuse to start if any plugin
-    # name has both a disk copy (plugins/<name>.py) AND a /lib/<name>
-    # world. Split-brain protection — disk would load first, /lib
-    # load would fail on route collision, stale disk copy silently
-    # serves traffic. Per PLAN §8.2.1–8.2.2.
-    _collisions = _find_lib_disk_collisions(_root)
-    if _collisions:
-        print("\n  ! elastik boot refused — plugin name collisions",
-              file=sys.stderr)
-        print("    These names exist both on disk AND as /lib/* worlds:",
-              file=sys.stderr)
-        for _n in _collisions:
-            print(f"      - {_n}  (plugins/{_n}.py AND /lib/{_n})",
-                  file=sys.stderr)
-        print("    Resolve by deleting one source per name:",
-              file=sys.stderr)
-        print("      disk wins:  rm data/lib%2F<name>/ (or DELETE /lib/<name>)",
-              file=sys.stderr)
-        print("      world wins: rm plugins/<name>.py  (migration complete)",
-              file=sys.stderr)
-        sys.exit(1)
 
-    load_plugins()
     register_plugin_routes()
-    _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")
-    _sync_dir("renderers", "renderer-*.html",
-              lambda f: f"usr/lib/renderer/{f.stem[9:]}", "renderers")  # strip "renderer-"
-    # Plugin-as-world Phase 1: after Tier 0 (disk) plugins load,
-    # iterate /lib/* worlds with state='active' and exec each.
-    # Per PLAN guardrail B, reads the DB directly — no self-HTTP.
-    # Per guardrail D, exec failures log and skip; state stays
-    # 'active' (operator intent), runtime route registration
-    # is missing.
+    # /lib/* is the only loader. Iterate data/ for lib/<name> worlds
+    # with state='active' and exec each. Per PLAN guardrail B, reads
+    # the DB directly — no self-HTTP. Per guardrail D, exec failures
+    # log and skip; state stays 'active' (operator intent), runtime
+    # route registration is missing.
     boot_load_active_lib()
     # /boot — write once at startup, read requires T3.
     # boot/env: which env vars are set (names + non-secret values).
