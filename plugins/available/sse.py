@@ -40,7 +40,12 @@ PARAMS_SCHEMA = {
 }
 
 _POLL = 0.02      # internal DB poll interval (seconds) — 20ms → up to 50 events/sec
-_HB_EVERY = 150   # heartbeat every N polls (3s at 20ms)
+_HB_EVERY = 25    # heartbeat every N polls (0.5s at 20ms).
+                  # Was 3s; dropped to 0.5s so HTTP/2 edge buffers (Cloudflare
+                  # tunnel, some nginx configs) flush more aggressively.
+                  # Cost: 6 bytes every 500ms per idle stream — negligible.
+                  # Benefit: idle SSE streams don't sit in an edge buffer for
+                  # 3+ seconds waiting for enough bytes to trigger a flush.
 
 
 async def handle(method, body, params):
