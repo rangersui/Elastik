@@ -80,7 +80,7 @@ _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
                "wav","ogg","woff","woff2","ttf","otf","eot","bin"}
 # FHS top-level namespaces + per-world internal ops. Module-level so
 # DELETE (line <710) can read them before the GET-ls branch would assign.
-_FHS = {"home", "etc", "usr", "var", "boot"}
+_FHS = {"home", "etc", "usr", "var", "boot", "lib"}
 _INTERNAL = {"sync", "pending", "result", "clear"}
 
 # ── X-Meta-* metadata headers (Phase 1: X-Meta-* only, PUT only) ────
@@ -362,7 +362,8 @@ def conn(name):
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
                 version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
-                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]');
+                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]',
+                state TEXT DEFAULT 'pending');
             INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
@@ -420,6 +421,15 @@ def conn(name):
             # someone PUTs with X-Meta-* headers.
             c.execute("ALTER TABLE stage_meta ADD COLUMN headers TEXT DEFAULT '[]'")
             c.execute("UPDATE stage_meta SET headers='[]' WHERE headers IS NULL OR headers=''")
+            c.commit()
+        if "state" not in cols:
+            # plugin-as-world Phase 0: `state` column for /lib/* plugin
+            # lifecycle (pending / active / disabled). Existing non-plugin
+            # worlds get 'pending' as default — meaningless outside /lib/*,
+            # harmless inside. Route contract: PUT /lib/<name> creates with
+            # state='pending'; PUT /lib/<name>/state with approve promotes.
+            c.execute("ALTER TABLE stage_meta ADD COLUMN state TEXT DEFAULT 'pending'")
+            c.execute("UPDATE stage_meta SET state='pending' WHERE state IS NULL OR state=''")
             c.commit()
         _db[name] = c
     return _db[name]
@@ -822,7 +832,7 @@ async def app(scope, receive, send):
         # Auth: T3 if any target is under a system prefix; else T2 is enough.
         # Capability tokens in read-only mode are rejected for writes.
         auth = _check_auth(scope)
-        needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/")) for t in targets)
+        needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/", "lib/")) for t in targets)
         if needs_approve and auth != "approve":
             return await send_r(send, 403, '{"error":"system delete requires approve"}')
         if not needs_approve and AUTH_TOKEN and auth is None:
@@ -859,6 +869,51 @@ async def app(scope, receive, send):
         # plain text — one per line. dirs get trailing /
         lines = [(n + "/" if d else n) for n, d in entries]
         return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain", head_only=ho)
+
+    # /lib/<name>/state — plugin lifecycle transition (Phase 0 of
+    # plugin-as-world). Separated from _INTERNAL ops because the
+    # semantics differ: this is a PUT on a virtual "state" sub-
+    # resource (set state to value), not a POST content-modifying op
+    # like /sync. Requires approve (T3) per the /etc/* analogue.
+    # This Phase 0 handler records the desired state only; it does
+    # NOT exec or register/unregister plugin routes. Route
+    # registration at activation is Phase 1.
+    if (method == "PUT" and len(parts) == 3 and parts[0] == "lib"
+            and parts[2] == "state"):
+        if _check_auth(scope) != "approve":
+            return await send_r(send, 403, '{"error":"state transition requires approve"}')
+        plugin = parts[1]
+        if not _valid_name(plugin):
+            return await send_r(send, 400, '{"error":"invalid plugin name"}')
+        world_name = "lib/" + plugin
+        try: body_bytes = await recv(receive)
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        target_state = body_bytes.decode("utf-8", "replace").strip()
+        if target_state not in ("active", "disabled"):
+            return await send_r(send, 422, json.dumps({
+                "error": "invalid state",
+                "allowed": ["active", "disabled"]}))
+        if not (DATA / _disk_name(world_name) / "universe.db").exists():
+            return await send_r(send, 404, '{"error":"plugin not found"}')
+        c = conn(world_name)
+        r = c.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+        prev_state = (r["state"] if r else "pending") or "pending"
+        ver = r["version"] if r else 0
+        if prev_state == target_state:
+            # Idempotent: no-op, no event, no version bump.
+            return await send_r(send, 200, json.dumps({
+                "state": target_state, "version": ver, "changed": False}))
+        c.execute("UPDATE stage_meta SET state=?,updated_at=datetime('now') WHERE id=1",
+                  (target_state,))
+        c.commit()
+        # Audit: state_transition is its own event type, separate from
+        # stage_written. "Who wrote source" and "who activated it" are
+        # separately queryable on the HMAC chain.
+        log_event(world_name, "state_transition", {
+            "from": prev_state, "to": target_state, "version": ver})
+        return await send_r(send, 200, json.dumps({
+            "state": target_state, "version": ver, "changed": True,
+            "from": prev_state}))
 
     # World routes — HTTP method IS the action.
     #   GET    /home/foo       → read content (no trailing slash)
@@ -975,7 +1030,7 @@ async def app(scope, receive, send):
             if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
             # JSON read
             c = conn(name)
-            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers FROM stage_meta WHERE id=1").fetchone()
+            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers,state FROM stage_meta WHERE id=1").fetchone()
             cv = params.get("v")
             if cv:
                 try:
@@ -988,14 +1043,18 @@ async def app(scope, receive, send):
             ext = r["ext"] or "html"
             # Metadata lives in response headers. The JSON body carries
             # content (stage_html + pending_js + js_result + version +
-            # ext). There is no "headers" field in the body — that was
-            # a transitional duplicate; header is the canonical home for
-            # metadata, same as everywhere else in HTTP.
+            # ext + state). There is no "headers" field in the body —
+            # that was a transitional duplicate; header is the canonical
+            # home for metadata, same as everywhere else in HTTP.
+            # `state` is meaningful for /lib/* plugin worlds (pending /
+            # active / disabled) and always 'pending' by default for
+            # other worlds — semantic scope is /lib/*, but the column
+            # exists on every row so the field is always present.
             extra_hdrs = _replay_meta_headers(r["headers"])
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext}),
+                "ext": ext, "type": ext, "state": r["state"] or "pending"}),
                 extra_headers=extra_hdrs, head_only=ho)
         # ── PUT: overwrite ──
         if method == "PUT":

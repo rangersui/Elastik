@@ -257,7 +257,7 @@ def test_python():
     # slip past the gate → 404 instead of 401.
     import shutil
     _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py", "sse.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py", "sse.py", "db.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -307,6 +307,7 @@ def test_python():
         _run_meta_headers_tests(py_port, "python", py_token, py_approve)
         _run_audit_binding_tests(py_port, "python", py_token, py_approve)
         _run_head_tests(py_port, "python", py_token, py_approve)
+        _run_lib_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -1698,6 +1699,153 @@ def _run_head_tests(port, label, token, approve):
     # cleanup
     http_method(port, f"/home/{W}", method="DELETE", token=approve)
     http_method(port, f"/home/head-redirect-prefix/child", method="DELETE", token=approve)
+
+
+def _run_lib_tests(port, label, token, approve):
+    """Phase 0 of plugin-as-world: /lib/* namespace, state column, and
+    the PUT /lib/<name>/state lifecycle transition.
+
+    Covers:
+      - /lib in _FHS: PUT creates world, GET reads it, DELETE needs T3
+      - stage_meta.state column: lazy-migrated, default 'pending'
+      - state field exposed in GET JSON envelope
+      - PUT /lib/<name>/state with body='active'|'disabled' (T3 approve)
+      - Idempotent re-transitions (changed:false, no event)
+      - Invalid state body → 422
+      - State transition emits audit event of type 'state_transition'
+
+    Not covered (Phase 1): boot loader, plugin source exec/activation,
+    route registration. Phase 0 is data model + routes only.
+    """
+    import http.client as _hc
+    W = "lib-test-weather"
+    src = "# plugin source\nROUTES = {}\nasync def handle(m,b,p): return {'ok':True}\n"
+
+    # cleanup prior run
+    http_method(port, f"/lib/{W}", method="DELETE", token=approve)
+
+    # 1. PUT /lib/<name> with T2 → 200, creates world at state='pending'
+    st, _ = http_method(port, f"/lib/{W}", method="PUT", body=src, token=token)
+    test(f"{label} lib: PUT /lib/{W} T2 -> 200", st == 200, f"status={st}")
+
+    # 2. GET /lib/<name> JSON shows state=pending
+    st, body = http_get(port, f"/lib/{W}")
+    test(f"{label} lib: GET /lib/{W} -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: newly-created world has state='pending'",
+         d.get("state") == "pending", f"state={d.get('state')!r}")
+
+    # 3. GET /lib/<name>?raw returns source bytes
+    st, body = http_get(port, f"/lib/{W}?raw")
+    test(f"{label} lib: ?raw returns plugin source", body == src,
+         f"body={body[:40]!r}")
+
+    # 4. PUT /lib/<name>/state with T2 → 403
+    st, _ = http_method(port, f"/lib/{W}/state", method="PUT", body="active",
+                        token=token)
+    test(f"{label} lib: state transition with T2 -> 403", st == 403,
+         f"status={st}")
+
+    # 5. PUT /lib/<name>/state with invalid body → 422
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="garbage", basic_auth=approve)
+    test(f"{label} lib: invalid state body -> 422", st == 422,
+         f"status={st}")
+
+    # 6. PUT /lib/<name>/state body='active' with T3 → 200, state=active
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activate with T3 -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: activation response state=active",
+         d.get("state") == "active" and d.get("changed") is True,
+         f"resp={d}")
+
+    # 7. GET JSON now reports state=active
+    _, body = http_get(port, f"/lib/{W}")
+    d = json.loads(body)
+    test(f"{label} lib: GET reports state=active after transition",
+         d.get("state") == "active", f"state={d.get('state')!r}")
+
+    # 8. Re-activate is idempotent (changed=false, no event)
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: re-activate is idempotent", st == 200,
+         f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: idempotent re-activation reports changed=false",
+         d.get("changed") is False, f"resp={d}")
+
+    # 9. Disable
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="disabled", basic_auth=approve)
+    test(f"{label} lib: disable -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: disable reports from=active to=disabled",
+         d.get("from") == "active" and d.get("state") == "disabled",
+         f"resp={d}")
+
+    # 10. DELETE /lib/<name> with T2 → 403 (lib requires approve)
+    st, _ = http_method(port, f"/lib/{W}", method="DELETE", token=token)
+    test(f"{label} lib: DELETE /lib/{W} with T2 -> 403", st == 403,
+         f"status={st}")
+
+    # 11. DELETE /lib/<name> with T3 → 200
+    st, _ = http_method(port, f"/lib/{W}", method="DELETE", token=approve)
+    test(f"{label} lib: DELETE /lib/{W} with T3 -> 200", st == 200,
+         f"status={st}")
+    st, _ = http_get(port, f"/lib/{W}")
+    test(f"{label} lib: deleted world -> 404", st == 404, f"status={st}")
+
+    # 12. State transition on nonexistent plugin → 404
+    st, _ = http_method(port, f"/lib/does-not-exist/state", method="PUT",
+                        body="active", basic_auth=approve)
+    test(f"{label} lib: state transition on missing plugin -> 404",
+         st == 404, f"status={st}")
+
+    # 13. Audit chain — state_transition events recorded.
+    # Read sqlite directly (same pattern as _run_audit_binding_tests);
+    # /dev/db would need to fight the server's WAL-mode connection for
+    # read-only access, and that's a separate plugin concern.
+    import sqlite3 as _sq, os as _os
+    http_method(port, f"/lib/{W}", method="PUT", body=src, token=token)
+    http_method(port, f"/lib/{W}/state", method="PUT", body="active",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W}/state", method="PUT", body="disabled",
+                basic_auth=approve)
+    db_path = _os.path.join("data", "lib%2F" + W, "universe.db")
+    if _os.path.exists(db_path):
+        db = _sq.connect(db_path)
+        try:
+            rows = db.execute(
+                "SELECT event_type, payload FROM events "
+                "ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+        finally:
+            db.close()
+        types = [r[0] for r in rows]
+        # Expected (newest first): state_transition (→disabled),
+        #   state_transition (→active), stage_written (PUT source), ...
+        test(f"{label} lib: audit chain has ≥2 state_transition events",
+             types.count("state_transition") >= 2, f"types={types}")
+        # Check payload of the most recent state_transition
+        trans_row = next((r for r in rows if r[0] == "state_transition"), None)
+        if trans_row:
+            try:
+                pd = json.loads(trans_row[1])
+            except (json.JSONDecodeError, TypeError):
+                pd = {}
+            test(f"{label} lib: state_transition payload has from+to+version",
+                 pd.get("from") in ("pending", "active") and
+                 pd.get("to") in ("active", "disabled") and
+                 "version" in pd,
+                 f"payload={pd}")
+    else:
+        skip(f"{label} lib: audit chain check",
+             f"world db not found at {db_path}")
+
+    # cleanup
+    http_method(port, f"/lib/{W}", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────
