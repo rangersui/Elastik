@@ -262,9 +262,22 @@ async def handle(method, body, params):
             return {"error": "html write requires approve", "_status": 403}
         if name.startswith(_SYS_PREFIXES) and server._check_auth(scope) != "approve":
             return {"error": "system write requires approve", "_status": 403}
+        # Phase 2.5 option B: DAV PUT extracts X-Meta-* same as core PUT, so
+        # the two write surfaces stay symmetric (transport + audit binding).
         c = server.conn(name)
-        c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext)); c.commit()
-        server.log_event(name, "stage_written", {"len":len(raw), "ext":ext})
+        meta = server._extract_meta_headers(scope)
+        c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta)); c.commit()
+        import hashlib as _hl, json as _json
+        ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+        body_hash = _hl.sha256(raw if isinstance(raw, bytes) else raw.encode("utf-8")).hexdigest()
+        server.log_event(name, "stage_written", {
+            "op": "put",
+            "len": len(raw),
+            "ext": ext,
+            "version_after": ver,
+            "meta_headers": _json.loads(meta or "[]"),
+            "body_sha256_after": body_hash,
+        })
         return {"_status":201, "_body":"", "_ct":"text/plain"}
 
     if method == "DELETE":

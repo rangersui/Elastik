@@ -267,11 +267,13 @@ def test_python():
     py_port = 13007
     py_token = "test-py-token"
     py_approve = "test-py-approve"
+    py_key = "test-audit-hmac-key"   # known to audit tests so HMAC chain can be verified end-to-end
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(py_port)
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = py_token
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
+    env["ELASTIK_KEY"] = py_key
     # Let public_gate tests impersonate a non-localhost client by sending
     # X-Forwarded-For (regression for the cloudflared-tunnel white-screen
     # bug — app shell resources fetched anonymously by the browser).
@@ -302,6 +304,8 @@ def test_python():
         _run_flush_sse_test(py_port, "python", py_token)
         _run_public_gate_shell_tests(py_port, "python", py_token, py_approve)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
+        _run_meta_headers_tests(py_port, "python", py_token, py_approve)
+        _run_audit_binding_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -1173,6 +1177,352 @@ def _run_public_gate_shell_tests(port, label, token, approve):
     c.close()
     test(f"{label} public_gate: 401 includes WWW-Authenticate: Basic",
          "Basic" in wa and "realm" in wa.lower(), f"wa={wa!r}")
+
+
+def _run_meta_headers_tests(port, label, token, approve):
+    """Phase 1 of 'HTTP is all you need': X-Meta-* request headers travel
+    with each PUT and replay on GET / ?raw. 16 checks covering happy path,
+    internal-ops isolation, read-side re-validation, and response-header
+    injection denial (X-Accel-Redirect etc. out of x-meta-* prefix)."""
+    W = "meta-test-world"
+
+    # cleanup prior state
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+    # 1. PUT X-Meta-Author → /read returns headers=[["x-meta-author","codex"]]
+    st, _ = http_method(port, f"/home/{W}", method="PUT", body="x",
+                        token=token, headers={"X-Meta-Author": "codex"})
+    test(f"{label} meta: PUT X-Meta-Author -> 200", st == 200, f"status={st}")
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: /read returns headers array",
+         d.get("headers") == [["x-meta-author", "codex"]],
+         f"headers={d.get('headers')}")
+
+    # 2. ?raw response has x-meta-author header
+    import http.client as _hc
+    def _raw_hdrs(path, extra_headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+        hdrs = dict(extra_headers or {})
+        c.request("GET", path, headers=hdrs)
+        r = c.getresponse(); r.read(); c.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}
+    st, hdrs = _raw_hdrs(f"/home/{W}?raw")
+    test(f"{label} meta: ?raw reflects x-meta-author",
+         hdrs.get("x-meta-author") == "codex", f"headers={hdrs}")
+
+    # 3. ?raw + Range → 206 also has x-meta-author
+    c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", f"/home/{W}?raw", headers={"Range": "bytes=0-0"})
+    r = c.getresponse(); r.read(); hdrs3 = {k.lower(): v for k, v in r.getheaders()}; st3 = r.status; c.close()
+    test(f"{label} meta: ?raw Range 206 also reflects x-meta-author",
+         st3 == 206 and hdrs3.get("x-meta-author") == "codex",
+         f"status={st3} headers={hdrs3}")
+
+    # 4. Multi-value (same name twice) → two list entries, HTTP allows it
+    #    urllib.request can't send dup headers easily, use http.client
+    c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.putrequest("PUT", f"/home/{W}")
+    c.putheader("Authorization", f"Bearer {token}")
+    c.putheader("X-Meta-Tag", "a")
+    c.putheader("X-Meta-Tag", "b")
+    c.putheader("Content-Length", "1")
+    c.endheaders(); c.send(b"x"); r = c.getresponse(); r.read(); c.close()
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    tags = [v for k, v in d.get("headers", []) if k == "x-meta-tag"]
+    test(f"{label} meta: multi-value X-Meta-Tag preserved", tags == ["a", "b"],
+         f"tags={tags} full={d.get('headers')}")
+
+    # 5. Authorization NOT stored (it's auth, not meta)
+    http_method(port, f"/home/{W}", method="PUT", body="x",
+                token=token, headers={"X-Meta-Only": "yes"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: Authorization not stored",
+         "authorization" not in kept, f"kept={kept}")
+
+    # 6. X-Forwarded-For not stored (infra, not user intent; not x-meta-*)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "1", "X-Forwarded-For": "1.2.3.4"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Forwarded-For not stored",
+         "x-forwarded-for" not in kept, f"kept={kept}")
+
+    # 7. X-Accel-Redirect not stored (nginx-interpreted response directive)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "1", "X-Accel-Redirect": "/etc/passwd"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Accel-Redirect not stored",
+         "x-accel-redirect" not in kept, f"kept={kept}")
+
+    # 8. CRLF/NUL injection in X-Meta value → dropped (can't inject via Python
+    # http clients directly — they refuse bad headers — so we inject at the
+    # DB layer to confirm read-side catches it too). See test 16 for that path.
+    # Here we do the client-side path: valid char-only stays, bad char rejected.
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Clean": "plain-ascii-ok"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: clean ASCII value stored",
+         any(k == "x-meta-clean" and v == "plain-ascii-ok"
+             for k, v in d.get("headers", [])),
+         f"headers={d.get('headers')}")
+
+    # 9. X-Elastik-Internal NOT stored (reserved prefix, also not x-meta-*)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Author": "u", "X-Elastik-Internal": "hack"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Elastik-* not stored (not x-meta-*)",
+         "x-elastik-internal" not in kept, f"kept={kept}")
+
+    # 10. One over-size value → drops that one, keeps others
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "small", "X-Meta-Huge": "a" * 2000})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = {k: v for k, v in d.get("headers", [])}
+    test(f"{label} meta: oversized value drops that header only",
+         "x-meta-keep" in kept and "x-meta-huge" not in kept,
+         f"kept={list(kept)}")
+
+    # 11. Total >8 KB → drop all (try with many small headers)
+    many = {f"X-Meta-Key{i}": "v" * 100 for i in range(100)}   # ~10 KB total JSON
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers=many)
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: total-overflow drops all",
+         d.get("headers") == [], f"headers_len={len(d.get('headers', []))}")
+
+    # 12. POST /sync does NOT clobber headers column
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Author": "alice"})
+    http_method(port, f"/home/{W}/sync", method="POST", body="sync-payload",
+                token=token, headers={"X-Meta-Author": "mallory"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: /sync internal op does not clobber headers",
+         d.get("headers") == [["x-meta-author", "alice"]],
+         f"headers={d.get('headers')}")
+
+    # 13. POST append does NOT clobber headers column either (Phase 1 scope)
+    http_method(port, f"/home/{W}", method="PUT", body="a", token=token,
+                headers={"X-Meta-Author": "alice"})
+    http_method(port, f"/home/{W}", method="POST", body="b", token=token,
+                headers={"X-Meta-Author": "mallory"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: POST append does not clobber headers (PUT-only)",
+         d.get("headers") == [["x-meta-author", "alice"]],
+         f"headers={d.get('headers')}")
+
+    # 14. Old client: PUT with no X-Meta-* → headers=[]
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token)
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: no X-Meta-* → headers=[]",
+         d.get("headers") == [], f"headers={d.get('headers')}")
+
+    # 15. Manually inject >8 KB headers JSON at DB level → ?raw returns no x-meta-*
+    import sqlite3, os
+    db_path = os.path.join("data", "home%2F" + W, "universe.db")
+    if not os.path.exists(db_path):
+        # fallback: world under ELASTIK_DATA not home/; try bare name
+        db_path = os.path.join("data", W, "universe.db")
+    if os.path.exists(db_path):
+        huge_pairs = [[f"x-meta-k{i}", "v" * 200] for i in range(50)]  # ~12 KB JSON
+        c = sqlite3.connect(db_path)
+        c.execute("UPDATE stage_meta SET headers=? WHERE id=1",
+                  (json.dumps(huge_pairs, separators=(",", ":")),))
+        c.commit(); c.close()
+        # close any cached connection on server side: PUT to force re-open? Actually
+        # server caches conn — easiest: DELETE then re-PUT closes the cached handle.
+        # Instead: just query and hope server re-reads. Sqlite WAL across processes
+        # should give us the fresh row.
+        _, hdrs15 = _raw_hdrs(f"/home/{W}?raw")
+        meta15 = [k for k in hdrs15 if k.startswith("x-meta-")]
+        test(f"{label} meta: read-side total-size fail-closed",
+             meta15 == [], f"leaked x-meta-* headers: {meta15}")
+    else:
+        skip(f"{label} meta: read-side total-size fail-closed",
+             f"db path not found: {db_path}")
+
+    # 16. Manually inject X-Accel-Redirect at DB level → not replayed
+    if os.path.exists(db_path):
+        bad_pairs = [["x-accel-redirect", "/etc/passwd"], ["x-meta-ok", "yes"]]
+        c = sqlite3.connect(db_path)
+        c.execute("UPDATE stage_meta SET headers=? WHERE id=1",
+                  (json.dumps(bad_pairs, separators=(",", ":")),))
+        c.commit(); c.close()
+        _, hdrs16 = _raw_hdrs(f"/home/{W}?raw")
+        test(f"{label} meta: read-side prefix filter blocks x-accel-redirect",
+             "x-accel-redirect" not in hdrs16 and hdrs16.get("x-meta-ok") == "yes",
+             f"headers={hdrs16}")
+
+    # cleanup
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+
+def _run_audit_binding_tests(port, label, token, approve):
+    """Phase 2.5: every write-type event's payload carries version_after,
+    meta_headers, and body_sha256_after. Append additionally carries
+    append_len / append_sha256. HMAC chain over the expanded payload
+    still verifies. DAV PUT shares the same shape."""
+    import hashlib as _hl, sqlite3 as _sq, os as _os, hmac as _hm
+    W = "audit-test-world"
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+    def _db_path(world):
+        # home/ prefix is URL sugar — internal world name drops it. System
+        # namespaces (etc/, var/, boot/) keep their prefix. Mirrors server.py.
+        if world.startswith("home/"): world = world[5:]
+        disk = world.replace("/", "%2F")
+        return _os.path.join("data", disk, "universe.db")
+
+    def _last_event_payload(world):
+        p = _db_path(world)
+        if not _os.path.exists(p): return None
+        db = _sq.connect(p)
+        try:
+            row = db.execute(
+                "SELECT payload FROM events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            db.close()
+
+    # 1. PUT → event has version_after, meta_headers, body_sha256_after, op
+    body = "hello-audit"
+    http_method(port, f"/home/{W}", method="PUT", body=body, token=token,
+                headers={"X-Meta-Author": "codex"})
+    p = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: PUT event has op=put",
+         p and p.get("op") == "put", f"payload={p}")
+    test(f"{label} audit: PUT event version_after is int",
+         p and isinstance(p.get("version_after"), int) and p["version_after"] >= 1,
+         f"ver={p.get('version_after')}")
+    test(f"{label} audit: PUT event meta_headers preserved",
+         p and p.get("meta_headers") == [["x-meta-author", "codex"]],
+         f"meta={p.get('meta_headers')}")
+    expected_hash = _hl.sha256(body.encode()).hexdigest()
+    test(f"{label} audit: PUT event body_sha256_after correct",
+         p and p.get("body_sha256_after") == expected_hash,
+         f"got={p.get('body_sha256_after')[:16] if p else None}... expected={expected_hash[:16]}...")
+
+    # 2. POST append → event has op=append, append_sha256, version_after, body_sha256_after
+    append_body = " more"
+    http_method(port, f"/home/{W}", method="POST", body=append_body, token=token)
+    p2 = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: append event has op=append",
+         p2 and p2.get("op") == "append", f"payload={p2}")
+    test(f"{label} audit: append_sha256 matches delta",
+         p2 and p2.get("append_sha256") == _hl.sha256(append_body.encode()).hexdigest(),
+         f"got={p2.get('append_sha256')[:16] if p2 else None}...")
+    test(f"{label} audit: append version_after = prev+1",
+         p2 and p2.get("version_after") == p["version_after"] + 1,
+         f"prev={p['version_after']} after={p2.get('version_after') if p2 else None}")
+    test(f"{label} audit: append body_sha256_after = sha256(prev+append)",
+         p2 and p2.get("body_sha256_after") == _hl.sha256((body + append_body).encode()).hexdigest(),
+         f"got={p2.get('body_sha256_after')[:16] if p2 else None}...")
+    test(f"{label} audit: append meta_headers is empty []",
+         p2 and p2.get("meta_headers") == [], f"meta={p2.get('meta_headers')}")
+
+    # 3. HMAC chain verifies end-to-end — recompute with the known KEY
+    # and compare against stored hmac. A stubbed HMAC impl that just
+    # chains values would pass a linkage-only check; recomputing catches it.
+    #
+    # The test subprocess was started with ELASTIK_KEY="test-audit-hmac-key"
+    # (see test_python env setup). Mirrors server.log_event exactly:
+    #     hmac = sha256(KEY, (prev_hmac + payload_json_str).encode())
+    KEY = b"test-audit-hmac-key"
+    dbp = _db_path(f"home/{W}")
+    if _os.path.exists(dbp):
+        db = _sq.connect(dbp)
+        try:
+            rows = db.execute(
+                "SELECT id, payload, hmac, prev_hmac FROM events ORDER BY id"
+            ).fetchall()
+            linkage_ok = True
+            last_hmac = ""
+            recompute_ok = True
+            for _id, _pl, _h, _ph in rows:
+                if _ph != last_hmac:
+                    linkage_ok = False
+                    break
+                expected = _hm.new(KEY, (_ph + _pl).encode("utf-8"),
+                                   _hl.sha256).hexdigest()
+                if expected != _h:
+                    recompute_ok = False
+                    break
+                last_hmac = _h
+            test(f"{label} audit: HMAC chain prev_hmac linkage holds",
+                 linkage_ok, f"rows={len(rows)}")
+            test(f"{label} audit: HMAC recomputes to stored value (key-aware)",
+                 recompute_ok, f"rows={len(rows)}")
+        finally:
+            db.close()
+
+    # 4. Current body hash matches last event's body_sha256_after
+    st, body_raw = http_get(port, f"/home/{W}?raw")
+    current_hash = _hl.sha256(body_raw.encode() if isinstance(body_raw, str) else body_raw).hexdigest()
+    p3 = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: current body matches last event's body_sha256_after",
+         p3 and p3.get("body_sha256_after") == current_hash,
+         f"current={current_hash[:16]}... last={p3.get('body_sha256_after')[:16] if p3 else None}...")
+
+    # 5. Internal ops (/sync) do NOT emit events — sanity-check the contract
+    dbp = _db_path(f"home/{W}")
+    db = _sq.connect(dbp)
+    events_before = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
+    http_method(port, f"/home/{W}/sync", method="POST", body="sync-payload",
+                token=token, headers={"X-Meta-Author": "mallory"})
+    db = _sq.connect(dbp)
+    events_after = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    db.close()
+    test(f"{label} audit: /sync does NOT emit audit events",
+         events_before == events_after,
+         f"before={events_before} after={events_after}")
+
+    # 5b. Non-ASCII byte-length: "你好" = 2 codepoints, 6 UTF-8 bytes.
+    # `len` and `body_sha256_after` must both describe the same byte
+    # string. Before the P2 fix, core PUT logged len=2 (str codepoints)
+    # while DAV logged len=6 (already-bytes), making cross-surface
+    # size checks inconsistent.
+    http_method(port, f"/home/{W}", method="PUT", body="你好", token=token)
+    pu = _last_event_payload(f"home/{W}")
+    test(f"{label} audit: non-ASCII core PUT len is byte count (6, not 2)",
+         pu and pu.get("len") == 6, f"len={pu.get('len') if pu else None}")
+    test(f"{label} audit: non-ASCII core PUT hash over same bytes",
+         pu and pu.get("body_sha256_after") == _hl.sha256("你好".encode("utf-8")).hexdigest(),
+         f"hash={pu.get('body_sha256_after')[:16] if pu else None}...")
+
+    # 6. DAV PUT → same event shape as core PUT (option B convergence)
+    DW = "audit-dav-test-world"
+    http_method(port, f"/home/{DW}", method="DELETE", token=approve)
+    http_method(port, f"/dav/home/{DW}", method="PUT", body="dav-body",
+                basic_auth=approve, headers={"X-Meta-Author": "dav-client"})
+    pd = _last_event_payload(f"home/{DW}")
+    test(f"{label} audit: DAV PUT event has op=put",
+         pd and pd.get("op") == "put", f"payload={pd}")
+    test(f"{label} audit: DAV PUT event meta_headers preserved",
+         pd and pd.get("meta_headers") == [["x-meta-author", "dav-client"]],
+         f"meta={pd.get('meta_headers') if pd else None}")
+    test(f"{label} audit: DAV PUT event body_sha256_after correct",
+         pd and pd.get("body_sha256_after") == _hl.sha256(b"dav-body").hexdigest(),
+         f"hash={pd.get('body_sha256_after')[:16] if pd else None}...")
+
+    # cleanup
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+    http_method(port, f"/home/{DW}", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────

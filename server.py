@@ -83,6 +83,67 @@ _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
 _FHS = {"home", "etc", "usr", "var", "boot"}
 _INTERNAL = {"sync", "pending", "result", "clear"}
 
+# ── X-Meta-* metadata headers (Phase 1: X-Meta-* only, PUT only) ────
+# Blind propagation: PUT request X-Meta-* headers are stored with the
+# world and replayed on GET/?raw. Not a governance surface — elastik
+# never interprets the values, never auth-checks on them, never routes
+# on them. Narrow whitelist (x-meta-* only) on both write and read to
+# keep infra response-control headers (X-Accel-Redirect, X-Sendfile,
+# X-Frame-Options) out of the reflection path.
+_MAX_META_VAL   = 1024       # per-header value bytes
+_MAX_META_TOTAL = 8192       # serialized JSON total bytes (same metric both sides)
+_META_NAME  = re.compile(r'^[a-z0-9!#$%&*+\-.^_`|~]+$')   # RFC 7230 token, lowercase
+_META_VALUE = re.compile(r'^[\t\x20-\x7e]*$')              # visible ASCII + space + HT
+
+def _extract_meta_headers(scope):
+    """Request scope → stored JSON list-of-pairs. Lowercase, validated,
+    fail-closed. Single over-size → drop that header; serialized total
+    over _MAX_META_TOTAL → drop all. Returns '[]' if none."""
+    out = []
+    for k, v in scope.get("headers", []):
+        try:
+            name = k.decode("ascii", "strict").lower()
+            value = v.decode("ascii", "strict")
+        except UnicodeDecodeError:
+            continue
+        if not name.startswith("x-meta-"): continue
+        if not _META_NAME.match(name):     continue
+        if not _META_VALUE.match(value):   continue
+        if len(value) > _MAX_META_VAL:     continue
+        out.append([name, value])
+    if not out: return "[]"
+    s = json.dumps(out, ensure_ascii=True, separators=(",", ":"))
+    return s if len(s) <= _MAX_META_TOTAL else "[]"
+
+def _replay_meta_headers(stored):
+    """Stored JSON → (ASGI extra-headers list, safe pairs list).
+    Re-validates every pair on read — DB may have been hand-edited or
+    imported with dirty data. Total size uses the exact same metric
+    as the write side (serialized JSON len with identical separators)
+    so write/read invariants are symmetric."""
+    try:
+        stored_list = json.loads(stored or "[]")
+    except (ValueError, TypeError):
+        return [], []
+    if not isinstance(stored_list, list):
+        return [], []
+    filtered = []
+    for item in stored_list:
+        if not (isinstance(item, list) and len(item) == 2): continue
+        k, v = item
+        if not (isinstance(k, str) and isinstance(v, str)): continue
+        if not k.startswith("x-meta-"):                     continue
+        if not _META_NAME.match(k):                         continue
+        if not _META_VALUE.match(v):                        continue
+        if len(v) > _MAX_META_VAL:                          continue
+        filtered.append([k, v])
+    # Total-size check uses the same metric as the write side so test 15
+    # (hand-written DB >8 KB JSON) gets rejected identically on read.
+    serialized = json.dumps(filtered, ensure_ascii=True, separators=(",", ":"))
+    if len(serialized) > _MAX_META_TOTAL:
+        return [], []
+    return [[k.encode(), v.encode()] for k, v in filtered], filtered
+
 def _infer_type(stage_html):
     """Heuristic for one-time migration of pre-type-column worlds."""
     s = (stage_html or '').lstrip()
@@ -297,7 +358,7 @@ def conn(name):
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
                 version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
-                ext TEXT DEFAULT 'plain');
+                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]');
             INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
@@ -329,10 +390,11 @@ def conn(name):
             c.execute("DROP TABLE stage_meta")
             c.executescript("""CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
-                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'plain');""")
-            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?)",
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
+                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]');""")
+            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?,?)",
                 (1, content, _safe(r,"pending_js"), _safe(r,"js_result"),
-                 _safe(r,"version",0), _safe(r,"updated_at"), ext))
+                 _safe(r,"version",0), _safe(r,"updated_at"), ext, "[]"))
             c.commit()
             print(f"  migrated: {name} (ext={ext})")
         elif "stage_html" not in cols and "stage" in cols:
@@ -341,12 +403,20 @@ def conn(name):
             c.execute("DROP TABLE stage_meta")
             c.executescript("""CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
-                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'plain');""")
-            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?)",
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
+                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]');""")
+            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?,?)",
                 (1, _safe(r,"stage"), _safe(r,"pending_js"), _safe(r,"js_result"),
-                 _safe(r,"version",0), _safe(r,"updated_at"), _safe(r,"ext","html")))
+                 _safe(r,"version",0), _safe(r,"updated_at"), _safe(r,"ext","html"), "[]"))
             c.commit()
             print(f"  fixed: {name} (stage→stage_html)")
+        elif "headers" not in cols:
+            # Phase 1 (X-Meta-* propagation): one new column. Empty default
+            # means existing worlds transparently have no metadata until
+            # someone PUTs with X-Meta-* headers.
+            c.execute("ALTER TABLE stage_meta ADD COLUMN headers TEXT DEFAULT '[]'")
+            c.execute("UPDATE stage_meta SET headers='[]' WHERE headers IS NULL OR headers=''")
+            c.commit()
         _db[name] = c
     return _db[name]
 
@@ -841,12 +911,15 @@ async def app(scope, receive, send):
             # ?raw → raw bytes with correct Content-Type
             if "raw" in params or "raw" in qs.split("&"):
                 c = conn(name)
-                r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+                r = c.execute("SELECT stage_html,ext,headers FROM stage_meta WHERE id=1").fetchone()
                 body = r["stage_html"] or b""
                 if isinstance(body, str): body = body.encode("utf-8")
                 ext = r["ext"] or "plain"
                 ct = _ext_to_ct(ext)
                 total = len(body)
+                # Replay stored X-Meta-* on both 200 and 206 paths. Re-validates
+                # on read so hand-edited DB / dirty imports can't bypass.
+                extra_hdrs, _ = _replay_meta_headers(r["headers"])
                 range_h = ""
                 for k, v in scope.get("headers", []):
                     if k == b"range": range_h = v.decode(); break
@@ -861,19 +934,19 @@ async def app(scope, receive, send):
                         [b"content-type", ct.encode()],
                         [b"content-range", f"bytes {start}-{end}/{total}".encode()],
                         [b"content-length", str(len(chunk)).encode()],
-                        [b"accept-ranges", b"bytes"]]})
+                        [b"accept-ranges", b"bytes"]] + extra_hdrs})
                     await send({"type":"http.response.body","body":chunk})
                 else:
                     await send({"type":"http.response.start","status":200,"headers":[
                         [b"content-type", ct.encode()],
                         [b"content-length", str(total).encode()],
-                        [b"accept-ranges", b"bytes"]]})
+                        [b"accept-ranges", b"bytes"]] + extra_hdrs})
                     await send({"type":"http.response.body","body":body})
                 return
             if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
             # JSON read
             c = conn(name)
-            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1").fetchone()
+            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers FROM stage_meta WHERE id=1").fetchone()
             cv = params.get("v")
             if cv:
                 try:
@@ -884,10 +957,11 @@ async def app(scope, receive, send):
                 try: raw = raw.decode("utf-8")
                 except UnicodeDecodeError: raw = ""
             ext = r["ext"] or "html"
+            _, safe_pairs = _replay_meta_headers(r["headers"])
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext}))
+                "ext": ext, "type": ext, "headers": safe_pairs}))
         # ── PUT: overwrite ──
         if method == "PUT":
             c = conn(name)
@@ -904,9 +978,28 @@ async def app(scope, receive, send):
             new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
             if (cur_ext == "html" or new_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
-            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext)); c.commit()
-            log_event(name, "stage_written", {"len": len(b), "ext": new_ext})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "ext": new_ext, "type": new_ext}))
+            hdrs = _extract_meta_headers(scope)
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs)); c.commit()
+            # Phase 2.5 audit binding: bind metadata to content at event time.
+            # Version + body hash + meta_headers go into the HMAC-chained
+            # payload so the claim ("codex wrote this, confidence 0.95")
+            # cannot be separated from the content it covers.
+            # len + sha256 both measured over the UTF-8-encoded bytes — so
+            # PUT "你好" (2 codepoints, 6 bytes) and DAV PUT of the same body
+            # agree on len=6 and on the hash. Python's len(str) counts code
+            # points, which would lie for non-ASCII if we used it directly.
+            ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+            body_bytes_for_hash = b if isinstance(b, bytes) else b.encode("utf-8")
+            body_hash = hashlib.sha256(body_bytes_for_hash).hexdigest()
+            log_event(name, "stage_written", {
+                "op": "put",
+                "len": len(body_bytes_for_hash),
+                "ext": new_ext,
+                "version_after": ver,
+                "meta_headers": json.loads(hdrs or "[]"),
+                "body_sha256_after": body_hash,
+            })
+            return await send_r(send, 200, json.dumps({"version": ver, "ext": new_ext, "type": new_ext}))
         # ── POST: append or internal op ──
         if method == "POST":
             c = conn(name)
@@ -935,9 +1028,30 @@ async def app(scope, receive, send):
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
             if (cur_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
+            # Measure the delta over its byte representation — same metric
+            # the hash uses — so append_len is unambiguous across text and
+            # binary payloads.
+            append_bytes_for_hash = b if isinstance(b, bytes) else b.encode("utf-8")
+            append_hash = hashlib.sha256(append_bytes_for_hash).hexdigest()
             c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            log_event(name, "stage_appended", {"len": len(b)})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
+            # Phase 2.5 audit binding: append-level provenance.
+            # append_sha256 pins the delta; body_sha256_after pins the resulting
+            # full state. meta_headers is intentionally empty — append does not
+            # update metadata (Phase 1 contract), and the event makes that visible.
+            r2 = c.execute("SELECT stage_html,version FROM stage_meta WHERE id=1").fetchone()
+            full = r2["stage_html"]
+            if isinstance(full, str): full = full.encode("utf-8")
+            full = full or b""
+            body_hash = hashlib.sha256(full).hexdigest()
+            log_event(name, "stage_appended", {
+                "op": "append",
+                "append_len": len(append_bytes_for_hash),
+                "append_sha256": append_hash,
+                "version_after": r2["version"],
+                "body_sha256_after": body_hash,
+                "meta_headers": [],
+            })
+            return await send_r(send, 200, json.dumps({"version": r2["version"]}))
 
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
