@@ -116,17 +116,21 @@ def _extract_meta_headers(scope):
     return s if len(s) <= _MAX_META_TOTAL else "[]"
 
 def _replay_meta_headers(stored):
-    """Stored JSON → (ASGI extra-headers list, safe pairs list).
+    """Stored JSON → ASGI extra-headers list (byte-encoded pairs).
     Re-validates every pair on read — DB may have been hand-edited or
     imported with dirty data. Total size uses the exact same metric
     as the write side (serialized JSON len with identical separators)
-    so write/read invariants are symmetric."""
+    so write/read invariants are symmetric.
+
+    Metadata lives in response headers — period. The JSON GET body no
+    longer duplicates it. Body is content, header is metadata; this
+    function's only job is to produce the headers."""
     try:
         stored_list = json.loads(stored or "[]")
     except (ValueError, TypeError):
-        return [], []
+        return []
     if not isinstance(stored_list, list):
-        return [], []
+        return []
     filtered = []
     for item in stored_list:
         if not (isinstance(item, list) and len(item) == 2): continue
@@ -137,12 +141,12 @@ def _replay_meta_headers(stored):
         if not _META_VALUE.match(v):                        continue
         if len(v) > _MAX_META_VAL:                          continue
         filtered.append([k, v])
-    # Total-size check uses the same metric as the write side so test 15
-    # (hand-written DB >8 KB JSON) gets rejected identically on read.
+    # Total-size check uses the same metric as the write side so a
+    # hand-written DB >8 KB JSON gets rejected identically on read.
     serialized = json.dumps(filtered, ensure_ascii=True, separators=(",", ":"))
     if len(serialized) > _MAX_META_TOTAL:
-        return [], []
-    return [[k.encode(), v.encode()] for k, v in filtered], filtered
+        return []
+    return [[k.encode(), v.encode()] for k, v in filtered]
 
 def _infer_type(stage_html):
     """Heuristic for one-time migration of pre-type-column worlds."""
@@ -930,7 +934,7 @@ async def app(scope, receive, send):
                 total = len(body)
                 # Replay stored X-Meta-* on both 200 and 206 paths. Re-validates
                 # on read so hand-edited DB / dirty imports can't bypass.
-                extra_hdrs, _ = _replay_meta_headers(r["headers"])
+                extra_hdrs = _replay_meta_headers(r["headers"])
                 range_h = ""
                 for k, v in scope.get("headers", []):
                     if k == b"range": range_h = v.decode(); break
@@ -968,17 +972,16 @@ async def app(scope, receive, send):
                 try: raw = raw.decode("utf-8")
                 except UnicodeDecodeError: raw = ""
             ext = r["ext"] or "html"
-            # Symmetric metadata: response headers get X-Meta-* replayed
-            # (same shape as ?raw), AND the JSON body keeps the "headers"
-            # field for backward compat. Both come from the same
-            # _replay_meta_headers() call — invariant by construction,
-            # not by discipline. AI stat() via HEAD /world now sees
-            # metadata without needing ?raw.
-            extra_hdrs, safe_pairs = _replay_meta_headers(r["headers"])
+            # Metadata lives in response headers. The JSON body carries
+            # content (stage_html + pending_js + js_result + version +
+            # ext). There is no "headers" field in the body — that was
+            # a transitional duplicate; header is the canonical home for
+            # metadata, same as everywhere else in HTTP.
+            extra_hdrs = _replay_meta_headers(r["headers"])
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext, "headers": safe_pairs}),
+                "ext": ext, "type": ext}),
                 extra_headers=extra_hdrs, head_only=ho)
         # ── PUT: overwrite ──
         if method == "PUT":

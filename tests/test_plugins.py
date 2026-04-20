@@ -1190,17 +1190,10 @@ def _run_meta_headers_tests(port, label, token, approve):
     # cleanup prior state
     http_method(port, f"/home/{W}", method="DELETE", token=approve)
 
-    # 1. PUT X-Meta-Author → /read returns headers=[["x-meta-author","codex"]]
-    st, _ = http_method(port, f"/home/{W}", method="PUT", body="x",
-                        token=token, headers={"X-Meta-Author": "codex"})
-    test(f"{label} meta: PUT X-Meta-Author -> 200", st == 200, f"status={st}")
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    test(f"{label} meta: /read returns headers array",
-         d.get("headers") == [["x-meta-author", "codex"]],
-         f"headers={d.get('headers')}")
-
-    # 2. ?raw response has x-meta-author header
+    # Metadata lives in response headers — period. The JSON body carries
+    # only content fields (stage_html + pending_js + js_result + version +
+    # ext). _meta_pairs() reads the response headers directly and returns
+    # the list of [k, v] pairs for x-meta-*, preserving duplicates.
     import http.client as _hc
     def _raw_hdrs(path, extra_headers=None):
         c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -1208,6 +1201,28 @@ def _run_meta_headers_tests(port, label, token, approve):
         c.request("GET", path, headers=hdrs)
         r = c.getresponse(); r.read(); c.close()
         return r.status, {k.lower(): v for k, v in r.getheaders()}
+    def _meta_pairs(path, extra_headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+        hdrs = dict(extra_headers or {})
+        c.request("GET", path, headers=hdrs)
+        r = c.getresponse(); r.read(); c.close()
+        # preserve ordering + duplicates (multi-value headers matter)
+        return [[k.lower(), v] for k, v in r.getheaders() if k.lower().startswith("x-meta-")]
+
+    # 1. PUT X-Meta-Author → GET response headers include it, JSON body
+    #    does NOT carry a "headers" field (that was dropped).
+    st, _ = http_method(port, f"/home/{W}", method="PUT", body="x",
+                        token=token, headers={"X-Meta-Author": "codex"})
+    test(f"{label} meta: PUT X-Meta-Author -> 200", st == 200, f"status={st}")
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: JSON GET response headers carry x-meta-author",
+         _meta_pairs(f"/home/{W}") == [["x-meta-author", "codex"]],
+         f"pairs={_meta_pairs(f'/home/{W}')}")
+    test(f"{label} meta: JSON body does NOT carry 'headers' field",
+         "headers" not in d, f"body_keys={list(d.keys())}")
+
+    # 2. ?raw response has x-meta-author header (unchanged behaviour)
     st, hdrs = _raw_hdrs(f"/home/{W}?raw")
     test(f"{label} meta: ?raw reflects x-meta-author",
          hdrs.get("x-meta-author") == "codex", f"headers={hdrs}")
@@ -1220,17 +1235,8 @@ def _run_meta_headers_tests(port, label, token, approve):
          st3 == 206 and hdrs3.get("x-meta-author") == "codex",
          f"status={st3} headers={hdrs3}")
 
-    # 3a. Symmetric-JSON-read: plain GET /world (no ?raw) now also replays
-    #     X-Meta-* in response headers, alongside the existing "headers"
-    #     field in the JSON body. Invariant: both come from the same
-    #     _replay_meta_headers() call — header and body can never drift.
-    st_json, hdrs_json = _raw_hdrs(f"/home/{W}")
-    test(f"{label} meta: JSON GET reflects x-meta-author in response headers",
-         hdrs_json.get("x-meta-author") == "codex",
-         f"headers={hdrs_json}")
-    test(f"{label} meta: JSON body 'headers' field preserved (back-compat)",
-         d.get("headers") == [["x-meta-author", "codex"]],
-         f"body_headers={d.get('headers')}")
+    # 3a. JSON GET and ?raw report the same x-meta-* set
+    _, hdrs_json = _raw_hdrs(f"/home/{W}")
     test(f"{label} meta: JSON GET x-meta-* matches ?raw x-meta-*",
          hdrs_json.get("x-meta-author") == hdrs.get("x-meta-author"),
          f"json={hdrs_json.get('x-meta-author')!r} raw={hdrs.get('x-meta-author')!r}")
@@ -1244,36 +1250,29 @@ def _run_meta_headers_tests(port, label, token, approve):
     c.putheader("X-Meta-Tag", "b")
     c.putheader("Content-Length", "1")
     c.endheaders(); c.send(b"x"); r = c.getresponse(); r.read(); c.close()
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    tags = [v for k, v in d.get("headers", []) if k == "x-meta-tag"]
+    pairs = _meta_pairs(f"/home/{W}")
+    tags = [v for k, v in pairs if k == "x-meta-tag"]
     test(f"{label} meta: multi-value X-Meta-Tag preserved", tags == ["a", "b"],
-         f"tags={tags} full={d.get('headers')}")
+         f"tags={tags} full={pairs}")
 
     # 5. Authorization NOT stored (it's auth, not meta)
     http_method(port, f"/home/{W}", method="PUT", body="x",
                 token=token, headers={"X-Meta-Only": "yes"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    kept = [k for k, _ in d.get("headers", [])]
+    kept = [k for k, _ in _meta_pairs(f"/home/{W}")]
     test(f"{label} meta: Authorization not stored",
          "authorization" not in kept, f"kept={kept}")
 
     # 6. X-Forwarded-For not stored (infra, not user intent; not x-meta-*)
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Keep": "1", "X-Forwarded-For": "1.2.3.4"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    kept = [k for k, _ in d.get("headers", [])]
+    kept = [k for k, _ in _meta_pairs(f"/home/{W}")]
     test(f"{label} meta: X-Forwarded-For not stored",
          "x-forwarded-for" not in kept, f"kept={kept}")
 
     # 7. X-Accel-Redirect not stored (nginx-interpreted response directive)
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Keep": "1", "X-Accel-Redirect": "/etc/passwd"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    kept = [k for k, _ in d.get("headers", [])]
+    kept = [k for k, _ in _meta_pairs(f"/home/{W}")]
     test(f"{label} meta: X-Accel-Redirect not stored",
          "x-accel-redirect" not in kept, f"kept={kept}")
 
@@ -1283,28 +1282,22 @@ def _run_meta_headers_tests(port, label, token, approve):
     # Here we do the client-side path: valid char-only stays, bad char rejected.
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Clean": "plain-ascii-ok"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
+    pairs = _meta_pairs(f"/home/{W}")
     test(f"{label} meta: clean ASCII value stored",
-         any(k == "x-meta-clean" and v == "plain-ascii-ok"
-             for k, v in d.get("headers", [])),
-         f"headers={d.get('headers')}")
+         any(k == "x-meta-clean" and v == "plain-ascii-ok" for k, v in pairs),
+         f"headers={pairs}")
 
     # 9. X-Elastik-Internal NOT stored (reserved prefix, also not x-meta-*)
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Author": "u", "X-Elastik-Internal": "hack"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    kept = [k for k, _ in d.get("headers", [])]
+    kept = [k for k, _ in _meta_pairs(f"/home/{W}")]
     test(f"{label} meta: X-Elastik-* not stored (not x-meta-*)",
          "x-elastik-internal" not in kept, f"kept={kept}")
 
     # 10. One over-size value → drops that one, keeps others
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Keep": "small", "X-Meta-Huge": "a" * 2000})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    kept = {k: v for k, v in d.get("headers", [])}
+    kept = dict(_meta_pairs(f"/home/{W}"))
     test(f"{label} meta: oversized value drops that header only",
          "x-meta-keep" in kept and "x-meta-huge" not in kept,
          f"kept={list(kept)}")
@@ -1313,39 +1306,33 @@ def _run_meta_headers_tests(port, label, token, approve):
     many = {f"X-Meta-Key{i}": "v" * 100 for i in range(100)}   # ~10 KB total JSON
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers=many)
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
+    pairs = _meta_pairs(f"/home/{W}")
     test(f"{label} meta: total-overflow drops all",
-         d.get("headers") == [], f"headers_len={len(d.get('headers', []))}")
+         pairs == [], f"pairs_len={len(pairs)}")
 
     # 12. POST /sync does NOT clobber headers column
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
                 headers={"X-Meta-Author": "alice"})
     http_method(port, f"/home/{W}/sync", method="POST", body="sync-payload",
                 token=token, headers={"X-Meta-Author": "mallory"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
+    pairs = _meta_pairs(f"/home/{W}")
     test(f"{label} meta: /sync internal op does not clobber headers",
-         d.get("headers") == [["x-meta-author", "alice"]],
-         f"headers={d.get('headers')}")
+         pairs == [["x-meta-author", "alice"]], f"pairs={pairs}")
 
     # 13. POST append does NOT clobber headers column either (Phase 1 scope)
     http_method(port, f"/home/{W}", method="PUT", body="a", token=token,
                 headers={"X-Meta-Author": "alice"})
     http_method(port, f"/home/{W}", method="POST", body="b", token=token,
                 headers={"X-Meta-Author": "mallory"})
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
+    pairs = _meta_pairs(f"/home/{W}")
     test(f"{label} meta: POST append does not clobber headers (PUT-only)",
-         d.get("headers") == [["x-meta-author", "alice"]],
-         f"headers={d.get('headers')}")
+         pairs == [["x-meta-author", "alice"]], f"pairs={pairs}")
 
-    # 14. Old client: PUT with no X-Meta-* → headers=[]
+    # 14. Old client: PUT with no X-Meta-* → no x-meta-* in response headers
     http_method(port, f"/home/{W}", method="PUT", body="x", token=token)
-    st, body = http_get(port, f"/home/{W}")
-    d = json.loads(body)
-    test(f"{label} meta: no X-Meta-* → headers=[]",
-         d.get("headers") == [], f"headers={d.get('headers')}")
+    pairs = _meta_pairs(f"/home/{W}")
+    test(f"{label} meta: no X-Meta-* → empty response meta",
+         pairs == [], f"pairs={pairs}")
 
     # 15. Manually inject >8 KB headers JSON at DB level → ?raw returns no x-meta-*
     import sqlite3, os
@@ -1549,11 +1536,11 @@ def _run_head_tests(port, label, token, approve):
     Content-Type, Accept-Ranges, Content-Range on 206, X-Meta-* on
     both JSON and ?raw world reads), body is always empty.
 
-    Symmetric after the follow-up `reflect X-Meta-* on JSON GET/HEAD
-    world reads` change: plain HEAD /world now exposes X-Meta-* too,
-    so AI can stat() without needing ?raw. The body's "headers" field
-    stays for backward compat. Browser-shell HEAD (Accept: text/html)
-    deliberately does NOT leak world metadata — asserted here.
+    AI does stat() via `curl -I /home/foo` — metadata lives in
+    response headers, which is where HTTP has always put it. ?raw is
+    only needed when you want raw bytes (not metadata). Browser-shell
+    HEAD (Accept: text/html) deliberately does NOT leak world
+    metadata — asserted here.
     """
     import http.client as _hc
     W = "head-test-world"

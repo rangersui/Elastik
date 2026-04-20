@@ -138,11 +138,12 @@ curl -X PUT localhost:3005/home/findings/x \
   -H "X-Meta-Severity: high" \
   -d "uint16 truncation in parse_url. upstream archived."
 
-# ?raw reflects metadata as response headers:
-curl -sD - -o /dev/null "localhost:3005/home/findings/x?raw"
+# GET and HEAD reflect metadata in response headers:
+curl -sI "localhost:3005/home/findings/x"
 # → x-meta-author: codex
 #   x-meta-confidence: 0.95
 #   x-meta-severity: high
+# ?raw is the same plus raw body bytes (content-type from ext).
 
 # bound to content in the event log:
 curl -X POST "localhost:3005/dev/db?world=home/findings/x" \
