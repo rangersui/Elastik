@@ -247,10 +247,17 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # Ensure gpu + devtools plugins are installed for testing
+    # Ensure gpu + devtools plugins are installed for testing. public_gate
+    # tags along: it's normally auto-installed as a default, but load_plugins()
+    # only triggers that branch when plugins/ is empty — the pre-install of
+    # these test fixtures makes plugins/ non-empty before the subprocess
+    # boots, so on a fresh CI checkout the defaults (admin/info/public_gate)
+    # never get installed at all. Without public_gate loaded, server._auth
+    # stays None and the non-local probes in _run_public_gate_shell_tests
+    # slip past the gate → 404 instead of 401.
     import shutil
     _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
