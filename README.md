@@ -231,7 +231,7 @@ curl -s "localhost:3005/home/boot?raw" | python -X utf8 -
 Snapshot a machine into durable worlds with one command:
 
 ```bash
-# If AUTH_TOKEN is configured (default via .env.example), export it first:
+# If ELASTIK_TOKEN is configured (default via .env.example), export it first:
 ELASTIK_TOKEN=your-t2-token bash examples/introspect.sh   # writes /home/env/{os,disk,...}
 curl localhost:3005/home/env/                             # list
 curl localhost:3005/home/env/processes?raw                # read content
