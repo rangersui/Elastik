@@ -2003,7 +2003,20 @@ async def _core_dav_handle(method, body, params):
             return {"error": "system write requires approve", "_status": 403}
         c = conn(name)
         meta = _extract_meta_headers(scope)
-        c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta)); c.commit()
+        # Phase 0/1 P2: source-changing PUT on /lib/* invalidates approval.
+        # Mirror the core FHS PUT handler — if state was active/disabled,
+        # reset to pending so re-approval re-binds to the new source hash.
+        # Without this, DAV writes silently swap code under an existing
+        # T3 approval and boot_load_active_lib would exec the new code on
+        # next restart without fresh operator sign-off.
+        is_lib = name.startswith("lib/")
+        cur = c.execute("SELECT state FROM stage_meta WHERE id=1").fetchone()
+        prev_state = ((cur["state"] if cur else "pending") or "pending") if is_lib else None
+        if is_lib and prev_state != "pending":
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,state='pending',version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta))
+        else:
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta))
+        c.commit()
         ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
         body_hash = hashlib.sha256(raw if isinstance(raw, bytes) else raw.encode("utf-8")).hexdigest()
         log_event(name, "stage_written", {
@@ -2014,6 +2027,11 @@ async def _core_dav_handle(method, body, params):
             "meta_headers": json.loads(meta or "[]"),
             "body_sha256_after": body_hash,
         })
+        # Forced state-reset audit event — matches core PUT handler.
+        if is_lib and prev_state and prev_state != "pending":
+            log_event(name, "state_transition", {
+                "from": prev_state, "to": "pending",
+                "version": ver, "reason": "source replaced"})
         return {"_status":201, "_body":"", "_ct":"text/plain"}
 
     if method == "DELETE":
