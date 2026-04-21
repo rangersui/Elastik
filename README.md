@@ -222,6 +222,20 @@ Any source-changing PUT resets `state=pending`, so approval re-binds to
 the new source hash. The chain records `stage_written` (with
 `body_sha256_after`) and `state_transition` events on every step.
 
+A plugin can do anything its source allows — including route registrations
+that make the HTTP interface unreachable. elastik is a process, not a
+sovereign OS. The filesystem is the real source of truth:
+
+```bash
+# Stop the server. Then:
+rm -rf "data/lib%2F<bad-plugin>/"
+python server.py
+```
+
+No recovery endpoint. No "safe mode" flag. The directory under `data/` is
+the plugin; `rm` is the uninstall. Works the same whether the plugin
+never activated, bricked everything, or just turned out boring.
+
 ## Pipes
 
 curl output is plain text. Unix pipes just work.
