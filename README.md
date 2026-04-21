@@ -49,12 +49,16 @@ Every path is a world. Writing to a new path creates it. FHS layout:
 ```
 GET    /home/{name}       read (JSON)
 GET    /home/{name}?raw   raw bytes
+HEAD   /home/{name}       stat — same headers as GET, no body
 PUT    /home/{name}       overwrite
 POST   /home/{name}       append
 DELETE /home/{name}       delete (T3)
 GET    /home/             ls (trailing slash)
+
+GET    /stream/{name}     SSE live updates
+GET    /proc/status       machine state {pid, uptime, worlds, plugins, version}
 GET    /proc/worlds       list all worlds
-GET    /bin               list all commands
+GET    /bin               list all active routes
 ```
 
 HTTP method IS the action. No `/read` `/write` suffixes. Trailing `/` = ls.
