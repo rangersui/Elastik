@@ -1433,6 +1433,76 @@ def _run_lib_tests(port, label, token, approve):
          st_t2 == 201, f"status={st_t2}")
     http_method(port, f"/lib/{W2e}", method="DELETE", token=approve)
 
+    # 12f. DAV MOVE/COPY/DELETE vs /lib/* approval-binding.
+    # Red-team 2026-04-21: T2 could MOVE or COPY an approved /lib plugin
+    # to a new name and carry state='active' over, auto-booting on next
+    # server restart without fresh T3 approval. And DAV DELETE on /lib/*
+    # only required T2 where core DELETE requires T3. Close all three
+    # holes in one commit.
+    Wf = "lib-dav-verb-test"
+    Wf_dst = "lib-dav-verb-test-moved"
+    Wf_copy = "lib-dav-verb-test-clone"
+    # Setup: install + activate lib/<Wf>
+    http_method(port, f"/lib/{Wf}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_dst}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_copy}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf}", method="PUT",
+                body="ROUTES=['/lib-verb-test']\nAUTH='none'\n"
+                     "async def handle(m,b,p): return {'v':1}\n",
+                token=token)
+    http_method(port, f"/lib/{Wf}/state", method="PUT", body="active",
+                basic_auth=approve)
+    _, body_pre = http_get(port, f"/lib/{Wf}")
+    test(f"{label} lib: verb-test setup — lib/{Wf} is active",
+         json.loads(body_pre).get("state") == "active",
+         f"state={json.loads(body_pre).get('state')!r}")
+
+    # (a) T2 MOVE /dav/lib/<Wf> -> /dav/lib/<Wf_dst>: dst must land pending.
+    import urllib.request as _ur, urllib.error as _ue, base64 as _b64
+    def _t2_dav(method, src_path, dst_path=None):
+        url = f"http://127.0.0.1:{port}{src_path}"
+        req = _ur.Request(url, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        if dst_path:
+            req.add_header("Destination", f"http://127.0.0.1:{port}{dst_path}")
+        try:
+            r = _ur.urlopen(req, timeout=5)
+            return r.status
+        except _ue.HTTPError as e:
+            return e.code
+    st_mv = _t2_dav("MOVE", f"/dav/lib/{Wf}", f"/dav/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV MOVE to /lib/* succeeds (T2 auth preserved)",
+         st_mv == 204, f"status={st_mv}")
+    _, body_mv = http_get(port, f"/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV MOVE dst -> state=pending (approval bypass blocked)",
+         json.loads(body_mv).get("state") == "pending",
+         f"state={json.loads(body_mv).get('state')!r}")
+
+    # (b) T2 COPY /dav/lib/<Wf_dst> -> /dav/lib/<Wf_copy>: same rule.
+    # Re-activate the moved world so the COPY source has state=active.
+    http_method(port, f"/lib/{Wf_dst}/state", method="PUT", body="active",
+                basic_auth=approve)
+    st_cp = _t2_dav("COPY", f"/dav/lib/{Wf_dst}", f"/dav/lib/{Wf_copy}")
+    test(f"{label} lib: T2 DAV COPY to /lib/* succeeds (T2 auth preserved)",
+         st_cp == 204, f"status={st_cp}")
+    _, body_cp = http_get(port, f"/lib/{Wf_copy}")
+    test(f"{label} lib: T2 DAV COPY dst -> state=pending (approval bypass blocked)",
+         json.loads(body_cp).get("state") == "pending",
+         f"state={json.loads(body_cp).get('state')!r}")
+
+    # (c) T2 DAV DELETE /dav/lib/<n> must be refused (403).
+    st_del = _t2_dav("DELETE", f"/dav/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV DELETE /lib/<n> -> 403 (T3 required)",
+         st_del == 403, f"status={st_del}")
+    _, body_still = http_get(port, f"/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV DELETE refused — world still exists",
+         json.loads(body_still).get("state") in ("active", "pending", "disabled"),
+         f"body={body_still[:80]!r}")
+
+    # Cleanup
+    http_method(port, f"/lib/{Wf_dst}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_copy}", method="DELETE", token=approve)
+
     # 13. Audit chain — state_transition events recorded.
     # Read sqlite directly (same pattern as _run_audit_binding_tests);
     # /dev/db would need to fight the server's WAL-mode connection for

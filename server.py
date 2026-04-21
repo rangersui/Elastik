@@ -2065,7 +2065,14 @@ async def _core_dav_handle(method, body, params):
                         targets.append(w)
         if not targets:
             return {"error":"not found", "_status":404}
-        needs_approve = any(t.startswith(_DAV_SYS_PREFIXES) for t in targets)
+        # DELETE on /lib/* requires T3 — matches core DELETE /lib/<n> which
+        # already includes lib/ in its elevated-auth tuple (server.py:915).
+        # _DAV_TOP_NAMESPACES = _DAV_SYS_PREFIXES + ("lib/",); reused here so
+        # T2 can't trash T3-approved plugins via DAV. PUT/MOVE/COPY keep
+        # _DAV_SYS_PREFIXES so DAV writes to /lib/<n> stay T2 (matching core
+        # PUT /lib/<n>) — MOVE/COPY into /lib/* are neutralized via state
+        # reset below, not via auth elevation.
+        needs_approve = any(t.startswith(_DAV_TOP_NAMESPACES) for t in targets)
         if needs_approve and _check_auth(scope) != "approve":
             return {"error":"system delete requires approve", "_status":403}
         for w in targets:
@@ -2112,6 +2119,23 @@ async def _core_dav_handle(method, body, params):
                 time.sleep(0.02 * (attempt + 1))
         else:
             shutil.move(str(src_disk), str(dst_disk))
+        # Approval-binding: a MOVE landing inside /lib/* carries the source
+        # world's state column over with the rename. If that state was
+        # active/disabled, the destination would auto-boot on next restart
+        # under a new name without any T3 re-approval. Force state back to
+        # pending so re-approval is explicit. Mirrors core PUT /lib/<n>.
+        if dst_name.startswith("lib/"):
+            dc = conn(dst_name)
+            dr = dc.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+            prev = ((dr["state"] if dr else "pending") or "pending")
+            if prev != "pending":
+                dc.execute("UPDATE stage_meta SET state='pending',"
+                           "updated_at=datetime('now') WHERE id=1")
+                dc.commit()
+                log_event(dst_name, "state_transition", {
+                    "from": prev, "to": "pending",
+                    "version": dr["version"] if dr else 0,
+                    "reason": "source replaced (via MOVE)"})
         log_event(dst_name, "stage_moved", {"from": src_name})
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
@@ -2164,6 +2188,23 @@ async def _core_dav_handle(method, body, params):
                 shutil.rmtree(dst_dir)
             dst_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_db, dst_db)
+            # Approval-binding: same reason as MOVE above. A raw file-copy
+            # of universe.db carries the state column over. If the copy
+            # target sits in /lib/*, force state=pending so the operator
+            # must re-approve before the clone can auto-boot under a new
+            # name.
+            if dw.startswith("lib/"):
+                dc = conn(dw)
+                dr = dc.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+                prev = ((dr["state"] if dr else "pending") or "pending")
+                if prev != "pending":
+                    dc.execute("UPDATE stage_meta SET state='pending',"
+                               "updated_at=datetime('now') WHERE id=1")
+                    dc.commit()
+                    log_event(dw, "state_transition", {
+                        "from": prev, "to": "pending",
+                        "version": dr["version"] if dr else 0,
+                        "reason": "source replaced (via COPY)"})
             log_event(dw, "stage_copied", {"from": sw})
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
