@@ -841,8 +841,15 @@ async def app(scope, receive, send):
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
                     name = _logical_name(d.name)
-                    r = conn(name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
-                    stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
+                    r = conn(name).execute("SELECT version,updated_at,state FROM stage_meta WHERE id=1").fetchone()
+                    entry = {"name": name, "version": r["version"], "updated_at": r["updated_at"]}
+                    # state is /lib-scoped semantics (pending/active/disabled).
+                    # Non-lib worlds have the column (default 'pending') but
+                    # the field is meaningless outside /lib — don't surface it
+                    # as if it were a general world property.
+                    if name.startswith("lib/"):
+                        entry["state"] = r["state"] or "pending"
+                    stages.append(entry)
         return await send_r(send, 200, json.dumps(stages))
     # /proc/uptime, /proc/version, /proc/status — Unix-style introspection
     if method == "GET" and path == "/proc/uptime":
