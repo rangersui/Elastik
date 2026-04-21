@@ -72,7 +72,7 @@ Three tiers. Physics, not policy.
 ```
 T1 (no token)      read anything public
 T2 (auth token)    write /home/*
-T3 (approve token) write /etc/*, /usr/*, /boot/*. delete. admin.
+T3 (approve token) write /etc/*, /usr/*, /boot/*. delete. activate plugins.
 ```
 
 ```bash
