@@ -179,26 +179,9 @@ def test_cgi():
         except Exception as e:
             test(f"{name}: --routes runs", False, str(e))
 
-    # Edge cases on echo (now part of devtools.py)
-    devtools_path = os.path.join("plugins", "available", "devtools.py")
-    if os.path.exists(devtools_path):
-        print(f"\n  --- echo edge cases (via devtools) ---")
-
-        # Empty body
-        req = json.dumps({"path": "/echo", "method": "POST", "body": "", "query": ""})
-        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("echo: empty body -> status 200", resp["status"] == 200)
-            test("echo: empty body -> empty body back", resp["body"] == "")
-
-        # Large body
-        big = "x" * 10000
-        req = json.dumps({"path": "/echo", "method": "POST", "body": big, "query": ""})
-        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("echo: large body -> preserved", len(resp["body"]) == 10000)
+    # Echo edge-case tests (formerly via devtools.py) retired in v4.5.0
+    # microkernel cut — devtools was removed; any future CGI-mode coverage
+    # for /echo has to re-land through /lib/* once a replacement ships.
 
     # ── Adversarial CGI tests ──
     print(f"\n  --- adversarial CGI tests ---")
@@ -247,20 +230,13 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # Ensure gpu + devtools + friends are installed as disk plugins for
-    # testing. public_gate is NOT in this list anymore — it was inlined
-    # into server.py in the microkernel cut, so the gate is active
-    # whenever ELASTIK_APPROVE_TOKEN is set regardless of disk plugin
-    # state.
-    import shutil
-    _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "sse.py", "db.py"]:
-        src = os.path.join(ROOT, "plugins", "available", pname)
-        dst = os.path.join(ROOT, "plugins", pname)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            _installed.append(dst)
-
+    # v4.5.0 microkernel cut: no more disk plugin preinstall. The disk
+    # loader (load_plugins / _verify_plugin / plugins.lock) is gone; /lib/*
+    # is the only loader. sse + dav are now inline core routes, public_gate
+    # is inlined into server.py, and the remaining Tier 1 candidates were
+    # removed from plugins/available/ (see logs/plugins-backup/ for source).
+    # Legacy per-plugin test helpers were retired with the cut — see
+    # commit fix(tests): retire legacy Tier 1 plugin test helpers.
     py_port = 13007
     py_token = "test-py-token"
     py_approve = "test-py-approve"
@@ -294,199 +270,57 @@ def test_python():
         test("Python server starts", True)
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
-        _run_plugin_auth_tests(py_port, "python", py_token, py_approve)
         _run_blob_ext_tests(py_port, "python", py_token, py_approve)
-        _run_http_tests(py_port, "python", token=py_token, approve=py_approve)
-        _run_devtools_tests(py_port, "python", token=py_token)
-        _run_flush_sse_test(py_port, "python", py_token)
+        _run_proc_tests(py_port, "python")
         _run_public_gate_shell_tests(py_port, "python", py_token, py_approve)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
         _run_meta_headers_tests(py_port, "python", py_token, py_approve)
         _run_audit_binding_tests(py_port, "python", py_token, py_approve)
         _run_head_tests(py_port, "python", py_token, py_approve)
         _run_lib_tests(py_port, "python", py_token, py_approve)
-        _run_lib_boot_collision_test(py_token, py_approve)
+        # _run_lib_boot_collision_test retired in v4.5.0 microkernel cut.
+        # The scenario (plugins/<name>.py colliding with /lib/<name>) is
+        # impossible now that the disk loader is removed; _find_lib_disk_collisions
+        # and its boot-refuse logic are also gone.
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # Clean up test-installed plugins
-        for p in _installed:
-            if os.path.exists(p):
-                os.remove(p)
 
 
-def _run_devtools_tests(port, label, token=""):
-    """Devtools route tests."""
-    print(f"\n  --- devtools {label} HTTP tests ---")
-
-    # /wc-c: upload byte counter
-    big = "x" * 50000
-    st, body = http_post(port, "/wc-c", big, token=token)
-    test(f"{label} devtools: POST /wc-c -> byte count",
-         st == 200 and body.strip() == "50000",
-         f"status={st} body={body[:40]}")
-
-    # /full: always 507
-    st, body = http_get(port, "/full")
-    test(f"{label} devtools: GET /full -> 507", st == 507, f"status={st}")
-
-    # /true: always 200
-    st, _ = http_get(port, "/true")
-    test(f"{label} devtools: GET /true -> 200", st == 200, f"status={st}")
-
-    # /false: always 403
-    st, _ = http_get(port, "/false")
-    test(f"{label} devtools: GET /false -> 403", st == 403, f"status={st}")
-
-    # /yes: returns 'yes' n times
-    st, body = http_get(port, "/yes?n=3")
-    test(f"{label} devtools: GET /yes?n=3 -> 3 lines",
-         st == 200 and body.strip() == "yes\nyes\nyes",
-         f"status={st} body={body[:40]}")
-
-    # /health: ok + uptime
-    st, body = http_get(port, "/health")
+def _run_proc_tests(port, label):
+    """Core /proc/ pseudo-filesystem tests — salvaged from the
+    retired _run_http_tests helper. Covers the Linux-/proc-analogue
+    listing surface that ships from server.py core, independent of
+    any plugin being loaded."""
+    # GET unknown path -> serves index.html (200).
+    # Unknown GET paths are world entry points.
+    st, body = http_get(port, "/proc/worlds")
+    test(f"{label}: GET /proc/worlds -> 200", st == 200, f"status={st}")
     if st == 200:
         try:
             d = json.loads(body)
-            test(f"{label} devtools: /health has ok", d.get("ok") is True)
-            test(f"{label} devtools: /health has uptime", "uptime" in d)
+            test(f"{label}: /proc/worlds returns array", isinstance(d, list))
         except json.JSONDecodeError:
-            test(f"{label} devtools: /health JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /health -> 200", False, f"status={st}")
+            test(f"{label}: /proc/worlds returns JSON", False)
 
-    # /whoami: isolation mirror
-    st, body = http_get(port, "/whoami")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /whoami has pid", "pid" in d)
-            test(f"{label} devtools: /whoami has user", "user" in d)
-            test(f"{label} devtools: /whoami has env", "env" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /whoami JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /whoami -> 200", False, f"status={st}")
-
-    # /verify: structural integrity
-    st, body = http_get(port, "/verify")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /verify has ok", "ok" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /verify JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /verify -> 200", False, f"status={st}")
-
-    # /config/dump: sanitized config
-    st, body = http_get(port, "/config/dump")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /config/dump has pid", "pid" in d)
-            test(f"{label} devtools: /config/dump token_set", "token_set" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /config/dump JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /config/dump -> 200", False, f"status={st}")
-
-    # /uuid: returns valid UUID
-    st, body = http_get(port, "/uuid")
-    test(f"{label} devtools: GET /uuid -> 200", st == 200, f"status={st}")
-    if st == 200:
-        import re
-        test(f"{label} devtools: /uuid is valid UUID",
-             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-                           body.strip())),
-             f"got: {body[:50]}")
-
-    # /cowsay: ASCII art
-    st, body = http_get(port, "/cowsay?say=test")
-    test(f"{label} devtools: GET /cowsay -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test(f"{label} devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
-
-    # /time: Unix epoch timestamp
-    st, body = http_get(port, "/time")
-    test(f"{label} devtools: GET /time -> 200", st == 200, f"status={st}")
-    if st == 200:
-        ts = int(body.strip())
-        now = int(time.time())
-        test(f"{label} devtools: /time within 5s of local clock",
-             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
-
-    # /rev: reverse bytes
-    st, body = http_post(port, "/rev", "hello", token=token)
-    test(f"{label} devtools: POST /rev 'hello' -> 'olleh'",
-         st == 200 and body.strip() == "olleh",
-         f"status={st} body={body[:40]}")
-
-    # /rev with emoji
-    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
-    test(f"{label} devtools: POST /rev emoji round-trip",
-         st == 200 and len(body.strip()) > 0,
-         f"status={st} body={body[:40]}")
-
-    # /grep: write a test world, search it, clean up
-    _grep_world = "grep-integration-test"
-    _grep_content = "line one alpha\nline two NEEDLE beta\nline three gamma"
-    # Write test data
-    st, _ = http_method(port, f"/home/{_grep_world}", method="PUT", body=_grep_content, token=token)
-    if st == 200:
-        # grep default mode: line-level matches (world:lineno:content)
-        st, body = http_get(port, "/grep?q=NEEDLE")
-        test(f"{label} devtools: /grep default -> line match",
-             st == 200 and f"{_grep_world}:2:" in body and "NEEDLE" in body,
-             f"status={st} body={body[:100]}")
-
-        # grep -l mode: filenames only
-        st, body = http_get(port, "/grep?q=NEEDLE&mode=l")
-        test(f"{label} devtools: /grep?mode=l -> filename list",
-             st == 200 and _grep_world in body,
-             f"status={st} body={body[:100]}")
-
-        # grep no match
-        st, body = http_get(port, "/grep?q=ZZZZNOTFOUND")
-        test(f"{label} devtools: /grep no match -> empty",
-             st == 200 and body.strip() == "",
-             f"status={st} body={body[:60]}")
-
-        # grep missing ?q=
-        st, body = http_get(port, "/grep")
-        test(f"{label} devtools: /grep no ?q= -> 400",
-             st == 400,
-             f"status={st}")
-
-        # /head: first N lines
-        st, body = http_post(port, f"/head?world={_grep_world}&n=1", "", token=token)
-        test(f"{label} devtools: /head?n=1 -> first line",
-             st == 200 and "alpha" in body and "NEEDLE" not in body,
-             f"status={st} body={body[:80]}")
-
-        # /tail: last N lines
-        st, body = http_post(port, f"/tail?world={_grep_world}&n=1", "", token=token)
-        test(f"{label} devtools: /tail?n=1 -> last line",
-             st == 200 and "gamma" in body and "NEEDLE" not in body,
-             f"status={st} body={body[:80]}")
-
-        # /wc: line/word/byte counts
-        st, body = http_post(port, f"/wc?world={_grep_world}", "", token=token)
-        if st == 200:
-            try:
-                d = json.loads(body)
-                test(f"{label} devtools: /wc -> 3 lines",
-                     d.get("lines") == 3, f"got {d}")
-            except json.JSONDecodeError:
-                test(f"{label} devtools: /wc JSON", False, body[:80])
-        else:
-            test(f"{label} devtools: /wc -> 200", False, f"status={st}")
-    else:
-        test(f"{label} devtools: grep setup (write world)", False, f"write status={st}")
+    # /proc/ — ls the pseudo-filesystem. Like `ls /proc` on Linux.
+    st, body = http_get(port, "/proc/")
+    test(f"{label}: GET /proc/ -> 200", st == 200, f"status={st}")
+    for n in ("status", "uptime", "version", "worlds"):
+        test(f"{label}: /proc/ lists {n}", n in body, f"body={body[:120]}")
+    st, body = http_method(port, "/proc/", method="GET",
+                           headers={"Accept": "application/json"})
+    try:
+        d = json.loads(body)
+        names = {e.get("name") for e in d if isinstance(e, dict)}
+        test(f"{label}: /proc/ JSON lists all four entries",
+             names == {"status", "uptime", "version", "worlds"},
+             f"names={names}")
+    except json.JSONDecodeError:
+        test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
 
 
 def _run_auth_tests(port, label, token, approve):
@@ -566,65 +400,6 @@ def _run_auth_tests(port, label, token, approve):
     # GET to mutation actions -> 405 (blocks <img src> CSRF)
     st, _ = http_get(port, "/home/authtest/sync")
     test(f"{label} csrf: GET /sync -> 405", st == 405, f"status={st}")
-
-
-def _run_plugin_auth_tests(port, label, token, approve):
-    """Auth tests for plugin routes: shell, exec, mirror, view, dav."""
-
-    # ── Shell: GET needs approve (Basic Auth) ──
-    st, _ = http_get(port, "/shell")
-    test(f"{label} plugin-auth: GET /shell no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/shell", basic_auth=approve)
-    test(f"{label} plugin-auth: GET /shell approve -> 200", st == 200, f"status={st}")
-
-    # ── Exec: POST needs approve ──
-    st, _ = http_post(port, "/exec", "echo hi")
-    test(f"{label} plugin-auth: POST /exec no auth -> 403", st in (401, 403), f"status={st}")
-
-    st, body = http_method(port, "/exec", method="POST", body="echo hi", basic_auth=approve)
-    test(f"{label} plugin-auth: POST /exec approve -> 200", st == 200 and "hi" in body, f"status={st}")
-
-    # ── Mirror: GET needs approve ──
-    st, _ = http_get(port, "/mirror")
-    test(f"{label} plugin-auth: GET /mirror no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/mirror", basic_auth=approve)
-    test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
-
-    # ── View: GET needs approve (+ type gate) ──
-    http_method(port, "/home/view-test?ext=html", method="PUT", body="<h1>test</h1>", token=token)
-    st, _ = http_get(port, "/view/view-test")
-    test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/view/view-test", basic_auth=approve)
-    # 200 if html-typed, 415 if plain — either means auth passed
-    test(f"{label} plugin-auth: GET /view approve -> auth passed", st in (200, 415), f"status={st}")
-
-    # ── WebDAV: reads open, writes need auth ──
-    st, _ = http_method(port, "/dav/", method="OPTIONS")
-    test(f"{label} plugin-auth: OPTIONS /dav -> 200", st == 200, f"status={st}")
-
-    st, _ = http_method(port, "/dav/", method="PROPFIND", headers={"Depth": "0"})
-    test(f"{label} plugin-auth: PROPFIND /dav no auth -> 207", st == 207, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="test")
-    test(f"{label} plugin-auth: PUT /dav no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-write", token=token)
-    test(f"{label} plugin-auth: PUT /dav token -> 201", st == 201, f"status={st}")
-
-    st, body = http_get(port, "/dav/home/auth-test-world")
-    test(f"{label} plugin-auth: GET /dav read back -> ok", st == 200 and "dav-write" in body, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-basic", basic_auth=approve)
-    test(f"{label} plugin-auth: PUT /dav Basic Auth -> 201", st == 201, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE")
-    test(f"{label} plugin-auth: DELETE /dav no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE", basic_auth=approve)
-    test(f"{label} plugin-auth: DELETE /dav approve -> 204", st == 204, f"status={st}")
 
 
 def _run_blob_ext_tests(port, label, token, approve):
@@ -736,296 +511,6 @@ def _run_blob_ext_tests(port, label, token, approve):
         test(f"{label} unicode: /proc/worlds has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
         test(f"{label} unicode: /proc/worlds has Korean", any("\ud55c" in n for n in names), "")
         test(f"{label} unicode: /proc/worlds has fake dir", any("\u82b1\u6912/" in n for n in names), "")
-
-
-def _run_http_tests(port, label, token="", approve=""):
-    """HTTP integration tests."""
-
-    # Echo
-    st, body = http_post(port, "/echo", "hello from test", token=token)
-    test(f"{label}: POST /echo -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test(f"{label}: POST /echo -> body preserved",
-             "hello from test" in body, f"body={body[:80]}")
-
-    # /dev/gpu — pluggable AI device.
-    # Plugin AUTH="none" so man page (browser GET) works without auth.
-    # Handler gates POST inline — anon POST must 401 (API-bill protection).
-    st_anon, _ = http_post(port, "/dev/gpu", "hi", token="")
-    test(f"{label}: POST /dev/gpu no auth -> 401", st_anon == 401, f"status={st_anon}")
-
-    # Browser GET (Accept: text/html) → man page form. 200 HTML, not 405.
-    st_gui, body_gui = http_method(port, "/dev/gpu", method="GET",
-                                    headers={"Accept": "text/html"})
-    test(f"{label}: GET /dev/gpu browser -> 200 man page",
-         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
-
-    # curl GET (no Accept) → 405 (POST-only endpoint).
-    st_curl_get, _ = http_get(port, "/dev/gpu")
-    test(f"{label}: GET /dev/gpu curl -> 405", st_curl_get == 405, f"status={st_curl_get}")
-
-    st2, _ = http_post(port, "/dev/gpu", "", token=token)
-    test(f"{label}: POST /dev/gpu empty -> 400", st2 == 400, f"status={st2}")
-
-    # Wipe etc/gpu.conf first so the "no conf -> 503" check is deterministic.
-    # Left-over conf from prior runs could make the backend answer 200.
-    http_method(port, "/etc/gpu.conf", method="DELETE", token=approve)
-    st3, body3 = http_post(port, "/dev/gpu", "ping", token=token)
-    # 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
-    test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
-         st3 in (502, 503), f"status={st3} body={body3[:80]}")
-
-    # /dev/fanout — tee-style broadcast.
-    # No conf → 503. Retry DELETE a few times — on Windows, the shared
-    # data/ dir may carry stale /etc/fanout.conf from a prior run, and
-    # _move_to_trash can partial-fail (file lock race, copytree succeeds
-    # but rmtree silently swallows the leftover src dir).
-    for _ in range(3):
-        http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
-        st, _ = http_post(port, "/dev/fanout", "hi", token=token)
-        if st == 503:
-            break
-        time.sleep(0.2)
-    test(f"{label}: fanout no conf -> 503", st == 503, f"status={st}")
-
-    # No auth → 401.
-    st, _ = http_post(port, "/dev/fanout", "hi", token="")
-    test(f"{label}: fanout no auth -> 401", st == 401, f"status={st}")
-
-    # Browser GET → man page.
-    st_gui, body_gui = http_method(port, "/dev/fanout", method="GET",
-                                    headers={"Accept": "text/html"})
-    test(f"{label}: fanout browser GET -> 200 man page",
-         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
-
-    # Write conf with 3 targets (T3 needed for /etc/* writes).
-    conf = "home/fanout-a\nhome/fanout-b\n# comment\n\n/home/fanout-c\n"
-    st, _ = http_method(port, "/etc/fanout.conf", method="PUT", body=conf, token=approve)
-    test(f"{label}: fanout conf write -> 200", st == 200, f"status={st}")
-
-    # POST /dev/fanout → append to all three. All should receive.
-    st, body = http_post(port, "/dev/fanout", "ping-1", token=token)
-    test(f"{label}: fanout POST -> 200", st == 200, f"status={st}")
-    d = json.loads(body)
-    test(f"{label}: fanout wrote 3 targets",
-         sorted(d.get("written", [])) == ["fanout-a", "fanout-b", "fanout-c"],
-         f"written={d.get('written')}")
-    test(f"{label}: fanout no failures", d.get("failed") == [], f"failed={d.get('failed')}")
-
-    # Each target has the message.
-    for tgt in ("fanout-a", "fanout-b", "fanout-c"):
-        st_t, body_t = http_get(port, f"/home/{tgt}")
-        dt = json.loads(body_t)
-        test(f"{label}: fanout target {tgt} got msg",
-             "ping-1" in dt.get("stage_html", ""), f"stage={dt.get('stage_html','')[:30]}")
-
-    # Second POST appends — target accumulates.
-    http_post(port, "/dev/fanout", "ping-2", token=token)
-    st_t, body_t = http_get(port, "/home/fanout-a")
-    dt = json.loads(body_t)
-    test(f"{label}: fanout POST appends",
-         "ping-1" in dt.get("stage_html", "") and "ping-2" in dt.get("stage_html", ""),
-         f"stage={dt.get('stage_html','')[:40]}")
-
-    # PUT overwrites — target content replaced.
-    http_method(port, "/dev/fanout", method="PUT", body="fresh", token=token)
-    st_t, body_t = http_get(port, "/home/fanout-a")
-    dt = json.loads(body_t)
-    test(f"{label}: fanout PUT overwrites",
-         dt.get("stage_html", "").strip() == "fresh",
-         f"stage={dt.get('stage_html','')[:40]}")
-
-    # System target in conf + T2 caller → that one fails, others still succeed.
-    conf_sys = "home/fanout-a\netc/fanout-sys-target\n"
-    http_method(port, "/etc/fanout.conf", method="PUT", body=conf_sys, token=approve)
-    st, body = http_post(port, "/dev/fanout", "t2-tries", token=token)
-    d = json.loads(body)
-    test(f"{label}: fanout T2 → home/* written",
-         "fanout-a" in d.get("written", []), f"written={d.get('written')}")
-    test(f"{label}: fanout T2 → etc/* refused",
-         any(f.get("target") == "etc/fanout-sys-target" for f in d.get("failed", [])),
-         f"failed={d.get('failed')}")
-
-    # T3 can hit system targets in fanout.
-    st, body = http_post(port, "/dev/fanout", "t3-can", token=approve)
-    d = json.loads(body)
-    test(f"{label}: fanout T3 → etc/* written too",
-         "etc/fanout-sys-target" in d.get("written", []),
-         f"written={d.get('written')}")
-
-    # Cap token — even mode=rw for /dev/fanout → still refused (broad vs narrow).
-    mint_body = http_method(port, "/auth/mint?prefix=/dev/fanout&ttl=600&mode=rw",
-                            method="POST", token=approve)
-    try:
-        cap = json.loads(mint_body[1]).get("token", "")
-    except Exception:
-        cap = ""
-    if cap:
-        st, _ = http_post(port, "/dev/fanout", "cap-tries", token=cap)
-        test(f"{label}: fanout rejects cap token -> 401", st == 401, f"status={st}")
-
-    # Cleanup — remove the test worlds and conf.
-    http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
-    for tgt in ("home/fanout-a", "home/fanout-b", "home/fanout-c", "etc/fanout-sys-target"):
-        http_method(port, "/" + tgt, method="DELETE", token=approve)
-
-    # Query-string URL-decoding regression: browsers URL-encode / as %2F
-    # when a form field value contains a slash. Before the fix, server.py
-    # hand-parsed qs without decoding → /dev/db got file="brave%2FHistory",
-    # _resolve_mnt did startswith("brave/") on "brave%2FHistory" → "file
-    # not under any fstab mount". Use /grep to probe: encode the space in
-    # "foo bar" as %20 and verify grep sees the decoded value.
-    http_method(port, "/home/qs-decode-grep", method="PUT",
-                body="line with foo bar here\nanother line", token=token)
-    st_enc, body_enc = http_get(port, "/grep?world=qs-decode-grep&q=foo%20bar")
-    test(f"{label}: qs decodes %20 to space (grep finds 'foo bar')",
-         st_enc == 200 and "foo bar" in body_enc, f"status={st_enc} body={body_enc[:80]}")
-
-    # /fetch — stdlib urllib.request, no curl subprocess. Protocol guard
-    # (only http/https) + urllib natively refuses file:// redirects.
-    st, _ = http_get(port, "/fetch")
-    test(f"{label}: /fetch no url -> 400", st == 400, f"status={st}")
-
-    st, _ = http_get(port, "/fetch?url=file:///etc/hosts")
-    test(f"{label}: /fetch file:// blocked at entry -> 400", st == 400, f"status={st}")
-
-    st, _ = http_get(port, "/fetch?url=ftp://example.com/foo")
-    test(f"{label}: /fetch ftp:// blocked at entry -> 400", st == 400, f"status={st}")
-
-    # argv-injection defense holds even with no subprocess — the scheme
-    # check would refuse a leading '-' too.
-    st, _ = http_get(port, "/fetch?url=-K/etc/passwd")
-    test(f"{label}: /fetch leading '-' blocked -> 400", st == 400, f"status={st}")
-
-    # Real fetch against our own elastik server (localhost, guaranteed up).
-    st, body = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/proc/worlds")
-    test(f"{label}: /fetch localhost http -> 200", st == 200, f"status={st}")
-    test(f"{label}: /fetch body looks like JSON array",
-         body.startswith("[") and body.rstrip().endswith("]"), f"body={body[:60]}")
-
-    # HTTPError pass-through: fetch a known 404 upstream, expect 404 back.
-    st, _ = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/home/nope-does-not-exist")
-    test(f"{label}: /fetch upstream 404 -> 404 passthrough", st == 404, f"status={st}")
-
-    # GET unknown path -> serves index.html (200).
-    # Unknown GET paths are world entry points.
-    st, body = http_get(port, "/proc/worlds")
-    test(f"{label}: GET /proc/worlds -> 200", st == 200, f"status={st}")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label}: /proc/worlds returns array", isinstance(d, list))
-        except json.JSONDecodeError:
-            test(f"{label}: /proc/worlds returns JSON", False)
-
-    # /proc/ — ls the pseudo-filesystem. Like `ls /proc` on Linux.
-    st, body = http_get(port, "/proc/")
-    test(f"{label}: GET /proc/ -> 200", st == 200, f"status={st}")
-    for n in ("status", "uptime", "version", "worlds"):
-        test(f"{label}: /proc/ lists {n}", n in body, f"body={body[:120]}")
-    st, body = http_method(port, "/proc/", method="GET",
-                           headers={"Accept": "application/json"})
-    try:
-        d = json.loads(body)
-        names = {e.get("name") for e in d if isinstance(e, dict)}
-        test(f"{label}: /proc/ JSON lists all four entries",
-             names == {"status", "uptime", "version", "worlds"},
-             f"names={names}")
-    except json.JSONDecodeError:
-        test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
-
-
-def _run_flush_sse_test(port, label, token):
-    """Integration test: /flush + SSE. The toilet is the test.
-
-    Network: SSE long-connection stays open.
-    State:   world mutates through 💩 → 💧 → ✨ atomically per write.
-    Timing:  POST triggers state changes, SSE delivers them.
-    """
-    import threading
-
-    # 1. Pre-seed /home/toilet so the SSE listener can't race
-    # /flush's world-creation. Without this, the listener connects
-    # before /flush has had a chance to create the world's DB; sse.py
-    # returns 404 ("world not found"); the listener thread dies
-    # silently; events[] stays empty. On local repeat runs a prior
-    # run's leftover world would hide the race — CI + fresh local
-    # alike always lost. Pre-seeding fixes both environments, so the
-    # CI skip that used to paper over this can go.
-    #
-    # DELETE first to nuke any leftover state from a prior /flush run:
-    # devtools._write_stage creates the DB with `ext DEFAULT 'html'`,
-    # which would then block our T2-auth PUT (the html-write-requires-
-    # approve gate). A DELETE (move-to-trash) makes the next PUT
-    # create a fresh DB with the core's `ext DEFAULT 'plain'`.
-    http_method(port, "/home/toilet", method="DELETE", token=token)
-    http_method(port, "/home/toilet", method="PUT", body="\U0001f4a9",
-                token=token)
-
-    # 2. Open SSE listener in background
-    events = []
-    def sse_listen():
-        try:
-            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/stream/toilet", timeout=10)
-            buf = b""
-            while True:
-                chunk = r.read(1)
-                if not chunk: break
-                buf += chunk
-                if buf.endswith(b"\n\n"):
-                    for line in buf.decode("utf-8", "replace").strip().splitlines():
-                        if line.startswith("data: "):
-                            try:
-                                d = json.loads(line[6:])
-                                events.append(d.get("stage_html", ""))
-                            except (json.JSONDecodeError, AttributeError):
-                                pass
-                    buf = b""
-        except Exception:
-            pass
-
-    t = threading.Thread(target=sse_listen, daemon=True)
-    t.start()
-    time.sleep(0.5)
-
-    # 3. Flush
-    st, body = http_post(port, "/flush", "", token=token)
-    test(f"{label} flush: POST /flush -> 200", st == 200, f"status={st}")
-    test(f"{label} flush: returns sparkle", "\u2728" in body, f"body={body[:20]}")
-
-    # 4. Wait for SSE events to arrive
-    time.sleep(1.5)
-
-    # 5. Verify SSE captured the show.
-    test(f"{label} flush: SSE got events", len(events) >= 3,
-         f"got {len(events)} events")
-    # Must start with 💩 and end with ✨
-    if events:
-        test(f"{label} flush: first event has seed",
-             "\U0001f4a9" in events[0] or "\U0001f4a9" in "".join(events[:2]),
-             f"first={events[0][:10]}")
-        test(f"{label} flush: last event is clean",
-             "\u2728" in events[-1],
-             f"last={events[-1][:10]}")
-        # Middle should have water
-        middle = "".join(events[1:-1])
-        test(f"{label} flush: middle has water",
-             "\U0001f4a7" in middle,
-             f"middle_sample={middle[:30]}")
-    else:
-        test(f"{label} flush: SSE events exist", False, "no events captured")
-
-    # 5. Verify world is clean
-    st, body = http_get(port, "/home/toilet")
-    if st == 200:
-        d = json.loads(body)
-        test(f"{label} flush: world is clean after",
-             "\u2728" in d.get("stage_html", ""),
-             f"stage={d.get('stage_html','')[:20]}")
-
-    # 6. Repeatable — flush again, should re-seed and re-flush
-    st, _ = http_post(port, "/flush", "", token=token)
-    test(f"{label} flush: repeatable", st == 200, f"status={st}")
 
 
 def _run_uint16_redteam_tests(port, label, token, approve):
@@ -2001,21 +1486,12 @@ def _run_lib_tests(port, label, token, approve):
                  f"body={body[:60]}")
     http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
 
-    # 17. Name collision with Tier 0 plugin → 422
-    # Tier 0 = disk-resident plugin installed from plugins/*.py at boot.
-    # 'admin' is the remaining Tier 0 default (info was cut in the
-    # microkernel v4.4 work; public_gate was inlined). Trying to
-    # activate /lib/admin must refuse so it cannot displace the Tier 0
-    # admin that's already in _plugin_meta.
-    http_method(port, f"/lib/admin", method="DELETE", token=approve)
-    http_method(port, f"/lib/admin", method="PUT",
-                body="ROUTES = []\nasync def handle(m,b,p): return {}\n",
-                token=token)
-    st, body = http_method(port, f"/lib/admin/state", method="PUT",
-                           body="active", basic_auth=approve)
-    test(f"{label} lib: Tier-0 name collision refused -> 422",
-         st == 422, f"status={st}")
-    http_method(port, f"/lib/admin", method="DELETE", token=approve)
+    # 17. Name collision with Tier 0 plugin — retired in v4.5.0 microkernel
+    # cut. There are no Tier 0 disk plugins anymore (load_plugins + the whole
+    # plugins/available/*.py autoloader is gone), so the collision check in
+    # load_plugin_from_source is unreachable by construction. The check
+    # itself is kept as defensive code for completeness but the HTTP test
+    # for it requires a loaded Tier 0 that no longer exists.
 
     # 18. Disable removes the route from runtime (check via /bin listing)
     st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
@@ -2066,10 +1542,23 @@ def _run_lib_tests(port, label, token, approve):
     # expect the routes to come back.
     W7 = "lib-retry-test"
     http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
+    # Test plugin declares a second route that calls unload_plugin on
+    # itself via NEEDS injection. With /admin cut in the microkernel, this
+    # is the only in-process way to simulate "state column says active but
+    # plugin is not loaded" — i.e. the guardrail-D boot-failure scenario
+    # the active→active retry path exists to handle. The self-kill route
+    # triggers unload; the plugin's state column stays 'active' because
+    # unload_plugin only touches _plugin_meta / _plugins, not the world DB.
     retry_src = (
-        "ROUTES = ['/lib-retry-test']\n"
+        "NEEDS = ['unload_plugin']\n"
+        "ROUTES = ['/lib-retry-test', '/lib-retry-test-selfkill']\n"
         "AUTH = 'none'\n"
-        "async def handle(m,b,p): return {'retry': 'ok'}\n"
+        "async def handle(m, b, p):\n"
+        "    scope = p.get('_scope', {})\n"
+        "    if scope.get('path', '').startswith('/lib-retry-test-selfkill'):\n"
+        "        unload_plugin('lib:lib-retry-test')\n"
+        "        return {'unloaded': True}\n"
+        "    return {'retry': 'ok'}\n"
     )
     http_method(port, f"/lib/{W7}", method="PUT", body=retry_src, token=token)
     http_method(port, f"/lib/{W7}/state", method="PUT", body="active",
@@ -2077,12 +1566,11 @@ def _run_lib_tests(port, label, token, approve):
     test(f"{label} lib: retry — route live pre-unload",
          _route_in_bin("/lib-retry-test"),
          "route not registered before retry test")
-    # Admin-unload by the lib:<name> meta name to simulate "state says
-    # active but plugin isn't loaded" (equivalent to a boot-time exec
-    # failure where guardrail D kept state='active'). admin.handle_unload
-    # reads name from the query string, not the body.
-    st, _ = http_method(port, f"/admin/unload?name=lib:{W7}",
-                       method="POST", body="", basic_auth=approve)
+    # Trigger in-process self-unload via the helper route. After this the
+    # plugin's routes (including the selfkill route) are gone from _plugins,
+    # but state='active' remains in the lib/<W7> world — matching the
+    # post-boot-failure state where guardrail D keeps operator intent.
+    st, _ = http_get(port, "/lib-retry-test-selfkill")
     # Sanity: unload succeeded and route is gone (but state=active stays)
     test(f"{label} lib: retry — route removed by simulated unload",
          not _route_in_bin("/lib-retry-test"), "unload did not take effect")
@@ -2110,89 +1598,6 @@ def _run_lib_tests(port, label, token, approve):
          d.get("changed") is False and d.get("reloaded") is not True,
          f"resp={d}")
     http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
-
-
-def _run_lib_boot_collision_test(token, approve):
-    """P2.1 fix: boot must refuse to start when a plugin name exists
-    BOTH as plugins/<name>.py on disk AND as a /lib/<name> world. Avoids
-    the split-brain where disk loads first, /lib load fails on route
-    collision, and the stale disk copy silently serves traffic.
-
-    Separate subprocess-based test because it exercises startup
-    behaviour (sys.exit before uvicorn binds), not live server behaviour.
-    """
-    import sqlite3 as _sq, shutil as _sh, tempfile as _tf, os as _os
-    import subprocess as _sp, socket as _so
-
-    # Work in an isolated temp root so we never touch the dev tree.
-    with _tf.TemporaryDirectory(prefix="elastik-boot-test-") as _tmp:
-        tmp_root = _os.path.abspath(_tmp)
-
-        # Copy the minimum files server.py needs to start.
-        for rel in ("server.py", "plugins.py", "plugins.lock",
-                    "index.html", "sw.js", "manifest.json"):
-            src = _os.path.join(ROOT, rel)
-            if _os.path.exists(src):
-                _sh.copy2(src, _os.path.join(tmp_root, rel))
-        # Copy the plugins/available/ tree so Tier 0 defaults can install.
-        av_src = _os.path.join(ROOT, "plugins", "available")
-        av_dst = _os.path.join(tmp_root, "plugins", "available")
-        if _os.path.exists(av_src):
-            _sh.copytree(av_src, av_dst)
-
-        # Create the collision: one plugin name that exists BOTH as
-        # plugins/<name>.py AND as data/lib%2F<name>/universe.db.
-        conflict_name = "boot-collision-test-name"
-        # Disk side
-        plugin_path = _os.path.join(tmp_root, "plugins",
-                                     f"{conflict_name}.py")
-        with open(plugin_path, "w", encoding="utf-8") as _f:
-            _f.write("ROUTES = {}\nasync def handle(m,b,p): return {}\n")
-        # World side — need the sqlite file with stage_meta table
-        world_disk = _os.path.join(tmp_root, "data",
-                                    "lib%2F" + conflict_name)
-        _os.makedirs(world_disk, exist_ok=True)
-        db_path = _os.path.join(world_disk, "universe.db")
-        c = _sq.connect(db_path)
-        c.execute("CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),"
-                  "stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '',"
-                  "js_result TEXT DEFAULT '', version INTEGER DEFAULT 0,"
-                  "updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'py',"
-                  "headers TEXT DEFAULT '[]', state TEXT DEFAULT 'active')")
-        c.execute("INSERT INTO stage_meta(id,stage_html,state,updated_at) "
-                  "VALUES(1,?,'active',datetime('now'))",
-                  ("# stub",))
-        c.commit(); c.close()
-
-        # Free port + spawn, capture stderr to prove the refuse message
-        s = _so.socket(); s.bind(("", 0)); port = s.getsockname()[1]; s.close()
-        env = _os.environ.copy()
-        env.update({
-            "ELASTIK_PORT": str(port), "ELASTIK_HOST": "127.0.0.1",
-            "ELASTIK_TOKEN": token, "ELASTIK_APPROVE_TOKEN": approve,
-            # No TRUST_PROXY set — not needed for this test
-        })
-        proc = _sp.Popen([sys.executable, "server.py"],
-                         env=env, cwd=tmp_root,
-                         stdout=_sp.PIPE, stderr=_sp.PIPE)
-        try:
-            stdout, stderr = proc.communicate(timeout=8)
-        except _sp.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            test("python lib: boot with disk+world collision → refuses to start",
-                 False, "server did not exit within 8s")
-            return
-
-        test("python lib: boot with disk+world collision → non-zero exit",
-             proc.returncode != 0, f"returncode={proc.returncode}")
-        combined = (stdout + stderr).decode("utf-8", "replace")
-        test("python lib: boot refuse message names the colliding plugin",
-             conflict_name in combined and "collision" in combined.lower(),
-             f"stderr_head={combined[:200]!r}")
-        test("python lib: boot refuse message lists resolution steps",
-             "rm plugins/" in combined or "DELETE /lib/" in combined,
-             f"stderr_head={combined[:200]!r}")
 
 
 # ── Main ────────────────────────────────────────────────────────────
