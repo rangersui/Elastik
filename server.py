@@ -1421,6 +1421,26 @@ _DANGEROUS_PLUGINS = {"exec", "fs"}
 _cron_tasks = {}   # name → {interval, handler, last_run}
 _start_time = time.time()
 
+# Plugin ROUTES registration constraints.
+# HARD REJECT: paths that would brick recovery or cause dispatch confusion.
+#   ""        — prefix-match wildcard. A plugin with ROUTES=[''] intercepts
+#               every request including /lib/<n>/state, locking the
+#               operator out of HTTP-based recovery (DB surgery only).
+#   "/lib*"   — /lib/<name>/state is core's state-transition endpoint;
+#               a plugin shadowing /lib/* blocks deactivate via HTTP.
+#   "/bin*"   — /bin/<route> is an alias that strips the prefix before
+#               plugin dispatch; registering under /bin scrambles that.
+_RESERVED_ROUTE_PREFIXES = ("/lib", "/bin")
+# SOFT WARN: paths that exist as inline handlers in app(). A plugin can
+# override them (extensibility), but the override should be visible in
+# activation logs so T3 reviewers notice.
+_INLINE_CORE_ROUTES = frozenset((
+    "/share", "/auth/mint",
+    "/proc", "/proc/status", "/proc/uptime", "/proc/version", "/proc/worlds",
+    "/manifest.json", "/sw.js", "/opensearch.xml",
+    "/favicon.ico", "/icon.png", "/icon-192.png",
+))
+
 # Mode system — environment detection × user intent.
 # Environment ceiling: container=2, bare metal=1. User cannot exceed it.
 IN_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv") or os.getenv("CONTAINER") == "1"
@@ -1501,6 +1521,24 @@ def load_plugin_from_source(plugin_name, source):
         declared = list(raw_routes.items())
     else:
         return False, f"ROUTES must be a list or dict, got {type(raw_routes).__name__}"
+    # Route constraints — hard-reject patterns that lock out recovery or
+    # scramble dispatch. Runs BEFORE the collision check so the error
+    # message is specific (reserved-prefix vs already-registered).
+    for route, _h in declared:
+        if not isinstance(route, str) or not route:
+            return False, f"route must be a non-empty string; got {route!r}"
+        if not route.startswith("/"):
+            return False, f"route must start with '/': {route!r}"
+        for rp in _RESERVED_ROUTE_PREFIXES:
+            if route == rp or route.startswith(rp + "/"):
+                return False, (f"route {route!r} is reserved — {rp}/* is core "
+                               f"namespace, shadowing it blocks operator recovery")
+    # Soft warn on shadowing an inline core route. Allowed (plugin could
+    # legitimately wrap it for logging etc), but T3 reviewers should see
+    # it in the activation log.
+    for route, _h in declared:
+        if route in _INLINE_CORE_ROUTES:
+            print(f"  ! plugin {plugin_name} shadows inline core route: {route}")
     prior = next((m for m in _plugin_meta if m["name"] == meta_name), None)
     own_routes = set(prior["routes"]) if prior else set()
     for route, _h in declared:
