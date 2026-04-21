@@ -1625,12 +1625,21 @@ async def handle_propose(method, body, params):
 
 async def handle_approve(method, body, params):
     """POST /plugins/approve — approve and install a plugin as /lib/<name>
-    (requires approve). Writes source to the /lib/<name> world with
-    state='pending', then activates via activate_lib_world (which execs
-    and registers routes). Flips state to 'active' on successful load.
+    (requires approve). Mirrors the canonical /lib/* surface end-to-end:
 
-    Rewired for the v4.5.0 microkernel cut: no longer writes to disk.
-    The disk-based load_plugin() is gone; /lib/* is the only loader."""
+      1. Source write: same UPDATE + state-reset + stage_written event
+         (with body_sha256_after) and forced state_transition (if prior
+         state != 'pending') that PUT /lib/<name> emits on its own.
+      2. Activation: activate_lib_world (shared with PUT /lib/<name>/state)
+         + state flip to 'active' + state_transition event identical in
+         shape to the one emitted by PUT /lib/<name>/state=active.
+
+    Post-condition: the event-chain provenance of a plugin installed via
+    /plugins/approve is indistinguishable from one installed via
+    PUT /lib/<name> + PUT /lib/<name>/state=active. Codex P1 2026-04-21.
+
+    Rewired for the v4.5.0 microkernel cut: no disk writes remain; /lib/*
+    is the only loader."""
     try: b = json.loads(body)
     except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
     scope = params.get("_scope", {})
@@ -1642,18 +1651,46 @@ async def handle_approve(method, body, params):
     if n and code:
         world_name = f"lib/{n}"
         c = conn(world_name)
+        cur = c.execute("SELECT state FROM stage_meta WHERE id=1").fetchone()
+        prev_state = ((cur["state"] if cur else "pending") or "pending")
+        code_bytes = code.encode("utf-8") if isinstance(code, str) else code
+        # Source write — /lib/* PUT semantics: reset state to pending, bump
+        # version, default ext='py'. Approval-binding invariant stays intact:
+        # a source-changing write on an already-approved world sinks it back
+        # to pending so the re-approval below re-binds to the new source hash.
         c.execute(
-            "UPDATE stage_meta SET stage_html=?,state='pending',"
-            "version=version+1,updated_at=datetime('now') WHERE id=1",
+            "UPDATE stage_meta SET stage_html=?,ext='py',headers=NULL,"
+            "state='pending',version=version+1,"
+            "updated_at=datetime('now') WHERE id=1",
             (code,),
         )
         c.commit()
+        ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+        body_hash = hashlib.sha256(code_bytes).hexdigest()
+        log_event(world_name, "stage_written", {
+            "op": "put",
+            "len": len(code_bytes),
+            "ext": "py",
+            "version_after": ver,
+            "meta_headers": [],
+            "body_sha256_after": body_hash,
+        })
+        if prev_state != "pending":
+            log_event(world_name, "state_transition", {
+                "from": prev_state, "to": "pending",
+                "version": ver, "reason": "source replaced"})
+        # Activation — /lib/<name>/state=active semantics: exec + register
+        # routes, flip state, emit state_transition. Exec failure leaves
+        # state='pending' and refuses activation (mirrors PUT state).
         ok, err = activate_lib_world(n)
         if not ok:
-            log_event("default", "plugin_approve_failed", {"name": n, "error": err})
+            log_event(world_name, "plugin_approve_failed", {"name": n, "error": err})
             return {"error": f"activation failed: {err}", "_status": 500}
-        c.execute("UPDATE stage_meta SET state='active' WHERE id=1")
+        c.execute("UPDATE stage_meta SET state='active',"
+                  "updated_at=datetime('now') WHERE id=1")
         c.commit()
+        log_event(world_name, "state_transition", {
+            "from": "pending", "to": "active", "version": ver})
         log_event("default", "plugin_approved", {"name": n})
     return {"ok": True}
 
