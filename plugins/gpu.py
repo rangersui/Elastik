@@ -176,7 +176,7 @@ async def _stream_ollama(endpoint, prompt, model):
     req = urllib.request.Request(f"http://{endpoint}/api/generate",
                                  data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    resp = await asyncio.to_thread(urllib.request.urlopen, req, 180)
+    resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=180)
     try:
         while True:
             line = await asyncio.to_thread(resp.readline)
@@ -217,7 +217,7 @@ async def _stream_openai_compat(endpoint, prompt, model,
                                  data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {key}")
-    resp = await asyncio.to_thread(urllib.request.urlopen, req, 180)
+    resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=180)
     try:
         while True:
             raw = await asyncio.to_thread(resp.readline)
@@ -268,7 +268,7 @@ async def _stream_claude(endpoint, prompt, model):
     req.add_header("Content-Type", "application/json")
     req.add_header("x-api-key", key)
     req.add_header("anthropic-version", "2023-06-01")
-    resp = await asyncio.to_thread(urllib.request.urlopen, req, 180)
+    resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=180)
     try:
         current_event = ""
         while True:
