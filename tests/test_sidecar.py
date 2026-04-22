@@ -476,6 +476,52 @@ def run():
 
         s, _, _ = _http("GET", "/mnt/unk/anything", token=TOKEN)
         test("unknown adapter scheme -> 501", s == 501, f"got {s}")
+
+        # ---- /shaped/mnt/<name>/<path> composition through semantic --
+        # Install semantic on top of fstab. /dev/gpu is absent in this
+        # subprocess, so semantic's _call_gpu_device raises
+        # _SLMUnavailable and the handler routes through
+        # _accept_gated_fallback. With Accept: text/plain at top of q,
+        # that branch returns 200 with the raw source bytes (tag
+        # `fallback-raw` in X-Semantic-Cache). Delivery of the mount
+        # bytes via /shaped/ is proof that _read_source("mnt/...")
+        # reached fstab in-process, unpacked the adapter's (body, ct,
+        # X-Mount-Version) triple, and threaded it into the prompt
+        # path. Without B.2 this would 404 with "world not found".
+        sem = os.path.join(ROOT, "plugins", "semantic.py")
+        with open(sem, "rb") as f:
+            sem_src = f.read()
+        s1, _, _ = _http("PUT", "/lib/semantic", body=sem_src, token=APPROVE,
+                         headers={"Content-Type": "text/x-python"})
+        test("install semantic plugin",
+             s1 in (200, 201), f"PUT /lib/semantic -> {s1}")
+        s2, _, _ = _http("PUT", "/lib/semantic/state", body="active",
+                         token=APPROVE)
+        test("activate semantic plugin",
+             s2 in (200, 204), f"PUT /lib/semantic/state -> {s2}")
+
+        if s1 in (200, 201) and s2 in (200, 204):
+            # file mount via /shaped/*
+            s, h, body = _http(
+                "GET", "/shaped/mnt/local/hello.txt", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/<file>/* -> 200 (fallback-raw, SLM down)",
+                 s == 200, f"got {s} body={body[:120]!r}")
+            test("/shaped/mnt/* reached semantic (X-Semantic-Cache set)",
+                 bool(h.get("x-semantic-cache")),
+                 f"headers={list(h.keys())}")
+            test("/shaped/mnt/<file>/* delivers file mount bytes",
+                 body == b"hello from disk", f"body={body!r}")
+
+            # http mount via /shaped/* — proves adapter CT + body flow
+            # through _read_source's mount branch, not just the file one
+            s, h, body = _http(
+                "GET", "/shaped/mnt/remote/ping", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/<http>/* -> 200 (fallback-raw, SLM down)",
+                 s == 200, f"got {s}")
+            test("/shaped/mnt/<http>/* delivers upstream bytes",
+                 body == b"pong", f"body={body!r}")
     finally:
         _stop_elastik(proc, tmp_root)
         try: upstream.shutdown()
