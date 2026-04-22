@@ -81,6 +81,22 @@ ELASTIK_TOKEN=your-t2-token
 ELASTIK_APPROVE_TOKEN=your-t3-token
 ```
 
+The examples below assume those env vars are already present in your shell.
+If they are not, either export/set them first, or replace the `$...TOKEN`
+placeholders with literal bearer tokens by hand.
+
+```bash
+# bash/zsh
+export ELASTIK_TOKEN=your-t2-token
+export ELASTIK_APPROVE_TOKEN=your-t3-token
+```
+
+```powershell
+# PowerShell
+$env:ELASTIK_TOKEN="your-t2-token"
+$env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+```
+
 ## Capability tokens
 
 Give an AI a path-scoped key instead of the full T2/T3 token.
@@ -211,12 +227,93 @@ curl -X DELETE http://localhost:3005/lib/example \
   -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN"
 ```
 
-The repo ships two specimens in `plugins/`. Neither is auto-loaded.
+The repo ships the following plugins in `plugins/`. None auto-load.
+Install each one via `./plugins/install.sh <name>` (or the PowerShell
+twin `./plugins/install.ps1 <name>` on Windows).
 
-| File | Shape |
-|---|---|
-| `plugins/example.py` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
-| `plugins/reality.py` | self-replicator — GET `/__reality__` (data tar.gz) + GET `/self` (source tar.gz) |
+First time, set the token env vars in the shell where you will run the
+helper:
+
+```bash
+# bash/zsh
+export ELASTIK_TOKEN=your-t2-token
+export ELASTIK_APPROVE_TOKEN=your-t3-token
+./plugins/install.sh gpu
+./plugins/install.sh semantic
+```
+
+```powershell
+# PowerShell
+$env:ELASTIK_TOKEN="your-t2-token"
+$env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+.\plugins\install.ps1 gpu
+.\plugins\install.ps1 semantic
+```
+
+| File | Routes | Role |
+|---|---|---|
+| `plugins/example.py` | `/example` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
+| `plugins/reality.py` | `/__reality__`, `/self` | self-replicator — data tar.gz + source tar.gz |
+| `plugins/gpu.py` | `/dev/gpu` | AI as a device. Backend from `/etc/gpu.conf` (ollama / openai / claude / deepseek / vast) |
+| `plugins/fstab.py` | `/mnt/*` | Mount local directories under `/mnt/`. Mount table in `/etc/fstab`. |
+| `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or `/mnt/`-mounted SQLite files |
+| `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
+| `plugins/semantic.py` | `/shaped/*` | Accept / User-Agent driven shape renderer. Delegates to `/dev/gpu`. See `PLAN-semantic-http.md`. |
+
+`gpu / fstab / db / fanout` form a **machine-primitives set** — blind
+device, blind mount, blind query, blind broadcast. Each has a config
+world under `/etc/<plugin>` or `/etc/<plugin>.conf`, so runtime
+behaviour swaps by `PUT /etc/...` without a plugin reload.
+
+### Mount anything
+
+`plugins/fstab.py` mounts local directories under `/mnt/*`, so files
+that live outside elastik (your projects folder, a browser history
+SQLite, Excel `.xlsm`, images, a music library) become readable via
+elastik's HTTP surface.
+
+Install first (it is a plugin, not core):
+
+```bash
+./plugins/install.sh fstab
+```
+
+Then write `/etc/fstab` — one line per mount, `local_path /mnt/name mode`:
+
+```bash
+curl -X PUT http://localhost:3005/etc/fstab \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" \
+  --data-binary @- <<'EOF'
+/Users/ranger/projects  /mnt/work  rw
+/home/ranger/docs       /mnt/docs  ro
+/Users/ranger/Library/Application Support/BraveSoftware/Brave-Browser/Default  /mnt/brave  ro
+EOF
+```
+
+Once mounted:
+
+```bash
+curl http://localhost:3005/mnt/                  # list mounts
+curl http://localhost:3005/mnt/work/             # directory listing
+curl http://localhost:3005/mnt/brave/History     # read a file (Brave's SQLite history)
+```
+
+`rw` mounts accept POST; `ro` mounts are GET-only. Writing to
+`/etc/fstab` requires T3 (approve) — that IS the permission model:
+what can enter the tree is decided by who can write the mount table.
+
+**Composes with `/dev/db`** for SQL over any external SQLite:
+
+```bash
+./plugins/install.sh db
+curl -X POST "http://localhost:3005/dev/db?file=brave/History" \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  -d "SELECT url FROM urls ORDER BY last_visit_time DESC LIMIT 10"
+```
+
+`?file=brave/History` resolves against the mount table: `brave/...`
+means "the file at this path under whatever local directory `/mnt/brave`
+points to." Read-only connection enforced at the SQLite layer.
 
 Any source-changing PUT resets `state=pending`, so approval re-binds to
 the new source hash. The chain records `stage_written` (with
