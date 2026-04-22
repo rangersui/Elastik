@@ -24,9 +24,11 @@ counters, urllib.request for HTTP, server.py as a subprocess).
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import urllib.error
@@ -334,24 +336,68 @@ def _http(method, path, body=None, token="", headers=None):
 
 
 def _start_server(extra_env=None):
-    """Spawn server.py for integration testing. By default /dev/gpu is
-    NOT installed, so any semantic cache miss ends in _SLMUnavailable
-    fallback -- deterministic, no model non-determinism."""
+    """Spawn server.py in an isolated temporary data directory and
+    return (proc, tmp_root).
+
+    Why isolate: server.py's DATA = Path("data") is CWD-relative, and
+    plugins like db.py read ELASTIK_DATA. If the test subprocess booted
+    against the repo's real data/ tree, any /lib/gpu that the developer
+    had previously installed would satisfy semantic's _call_gpu_device
+    lookup and flip Layer 2's "SLM unreachable" fallback assertions
+    into live-generation responses. Codex reproduced exactly that.
+
+    The temp dir is empty; tests that need preconditions (e.g. a source
+    world, or /dev/gpu installed for Layer 3) seed them explicitly.
+    Caller MUST shutil.rmtree(tmp_root) in its finally — we return the
+    path as the second tuple element so cleanup stays explicit.
+
+    Windows note: server's SQLite conn cache keeps file handles open;
+    caller should proc.terminate() + proc.wait() BEFORE rmtree. rmtree
+    uses ignore_errors=True as a belt against the race."""
+    tmp_root = tempfile.mkdtemp(prefix="elastik-test-semantic-")
+    tmp_data = os.path.join(tmp_root, "data")
+    os.makedirs(tmp_data, exist_ok=True)
+
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(PORT)
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = TOKEN
     env["ELASTIK_APPROVE_TOKEN"] = APPROVE
     env["ELASTIK_KEY"] = KEY
+    # ELASTIK_DATA for plugins that read env (e.g. db.py); cwd for
+    # server.py's own DATA = Path("data"). Both point at the same
+    # tmp tree so the subprocess cannot see the repo's real data/.
+    env["ELASTIK_DATA"] = tmp_data
     env["SEMANTIC_GEN_CAP_PER_MIN"] = "60"
     if extra_env:
         env.update(extra_env)
+
+    # Run server.py by absolute path, with cwd=tmp_root, so DATA
+    # resolves to tmp_root/data and .env / data/ under ROOT are
+    # ignored. server.py's INDEX/SW/MANIFEST use Path(__file__) and
+    # survive the cwd change.
+    server_py = os.path.join(ROOT, "server.py")
     proc = subprocess.Popen(
-        [sys.executable, "server.py"], env=env, cwd=ROOT,
+        [sys.executable, server_py], env=env, cwd=tmp_root,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-    return proc
+    return proc, tmp_root
+
+
+def _stop_server(proc, tmp_root):
+    """Terminate the subprocess, wait briefly, then rmtree the temp
+    data dir. Swallow all cleanup errors -- the test verdict already
+    stands."""
+    if proc is not None:
+        try: proc.terminate()
+        except Exception: pass
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try: proc.kill()
+            except Exception: pass
+    if tmp_root:
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _install_gpu_plugin():
@@ -404,7 +450,7 @@ def _seed_source():
 
 def run_layer2():
     print("\n=== Layer 2: HTTP integration (SLM unreachable) ===")
-    proc = _start_server()
+    proc, tmp_root = _start_server()
     try:
         if not _free_port_check(PORT, timeout=15):
             test("server boots", False, "server didn't accept connections")
@@ -484,11 +530,7 @@ def run_layer2():
         test("X-Semantic-Render is 16 hex chars",
              len(h.get("X-Semantic-Render") or "") == 16)
     finally:
-        try: proc.terminate()
-        except Exception: pass
-        try: proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_server(proc, tmp_root)
 
 
 def run_layer2_ratecap():
@@ -496,7 +538,7 @@ def run_layer2_ratecap():
     ratelimit-raw and ratelimit-429 without flakiness from other tests'
     generation counter state."""
     print("\n=== Layer 2b: HTTP integration (rate cap) ===")
-    proc = _start_server(extra_env={"SEMANTIC_GEN_CAP_PER_MIN": "1"})
+    proc, tmp_root = _start_server(extra_env={"SEMANTIC_GEN_CAP_PER_MIN": "1"})
     try:
         if not _free_port_check(PORT, timeout=15):
             test("server boots (cap=1)", False, "timeout")
@@ -547,11 +589,7 @@ def run_layer2_ratecap():
         test("rate-cap: source bytes surfaced in raw fallback",
              "revenue" in body3)
     finally:
-        try: proc.terminate()
-        except Exception: pass
-        try: proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_server(proc, tmp_root)
 
 
 # ====================================================================
@@ -571,7 +609,7 @@ def run_layer3():
         skip("Layer 3", f"ollama not reachable at {ollama_url}: {e}")
         return
 
-    proc = _start_server()
+    proc, tmp_root = _start_server()
     try:
         if not _free_port_check(PORT, timeout=15):
             test("live server boots", False, "timeout")
@@ -617,11 +655,7 @@ def run_layer3():
         test("live cache-hit body matches first response",
              body == body2)
     finally:
-        try: proc.terminate()
-        except Exception: pass
-        try: proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_server(proc, tmp_root)
 
 
 # ====================================================================
