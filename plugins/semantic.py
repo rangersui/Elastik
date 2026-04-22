@@ -106,8 +106,13 @@ GPU_CONF_WORLD = "etc/gpu.conf"
 # system prompt (PLAN §8)
 # ====================================================================
 
-SYSTEM_PROMPT = """You are a format-shaping renderer for elastik. You receive three inputs:
-  - source content (bytes stored under /home/..., /lib/..., etc.)
+SYSTEM_PROMPT = """You are a format-shaping renderer for elastik. You receive four inputs:
+  - source content (bytes stored under /home/..., /lib/..., or fetched
+    live through /mnt/... mounts declared in /etc/fstab)
+  - SOURCE_CONTENT_TYPE: the MIME type the source declared. Use this
+    to interpret structured sources (JSON, CSV, HTML, etc.) correctly
+    before reshaping. If it conflicts with what the bytes actually
+    look like, trust the bytes.
   - REQUIRED_CONTENT_TYPE: a specific MIME type. Your output MUST be
     valid for this type. This is a hard constraint from the client's
     Accept header.
@@ -280,6 +285,90 @@ def _read_world(name: str):
     if not row:
         return None
     return (row["stage_html"] or b"", row["version"] or 0, row["ext"] or "plain")
+
+
+def _ext_to_ct(ext: str) -> str:
+    """Reverse lookup of server.py's _CT dict with a conservative
+    fallback. SLM prompts work better against text than opaque octets
+    when ext is unknown, so we default to text/plain rather than
+    server._ext_to_ct's application/octet-stream. The result is fed
+    to the prompt as SOURCE_CONTENT_TYPE — see _build_prompt."""
+    return server._CT.get(ext or "plain", "text/plain")
+
+
+async def _read_via_fstab(mnt_path: str):
+    """In-process call into /mnt/<mnt_path>. No HTTP loopback.
+
+    Returns (body_bytes, version_token, source_ct) on success, else
+    None (treated as 404 upstream). Uses server._plugins to locate the
+    fstab handler — same pattern _call_gpu_device uses for /dev/gpu.
+
+    Version token is "mount:<X-Mount-Version>" when the adapter sets
+    that header (file: mtime:<ns>, https: etag:<val> or len=...;head=).
+    Fallback is "mount:unknown" for adapters that don't carry a
+    version — the cache key then pins on body-hash inside the adapter
+    response rather than a stable token.
+    """
+    mnt_handler = server._plugins.get("/mnt")
+    if mnt_handler is None:
+        return None                           # no fstab installed
+    fake_scope = {
+        "type":    "http",
+        "method":  "GET",
+        "path":    "/mnt/" + mnt_path,
+        "headers": [],                        # AUTH=none on /mnt/;
+                                              # nothing to forward
+    }
+    try:
+        result = await mnt_handler("GET", "", {"_scope": fake_scope})
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    status = result.get("_status", 200)
+    if status >= 400:
+        return None                           # 404 / 501 / 502 / 413
+    body = result.get("_body")
+    if body is None:
+        return None
+    ct = result.get("_ct", "application/octet-stream")
+    ver = "mount:unknown"
+    for k, v in result.get("_headers") or []:
+        if str(k).lower() == "x-mount-version":
+            ver = "mount:" + str(v)
+            break
+    return body, ver, ct
+
+
+async def _read_source(name: str):
+    """Dispatch world-backed vs mount-backed sources.
+
+    Returns (body_bytes, version_token, source_content_type), or None
+    if the source doesn't resolve either way.
+
+    Dispatch:
+      name starts with 'mnt/' -> /mnt/<rest> via fstab in-process.
+                                 The adapter owns both the bytes and
+                                 the Content-Type. Version token is
+                                 whatever X-Mount-Version the adapter
+                                 set (prefixed 'mount:').
+      else                     -> existing _read_world. Source CT is
+                                 inferred from the ext column via
+                                 _ext_to_ct. Version token is
+                                 'world:v<N>' — stringified so the
+                                 cache key accepts it without a
+                                 type change in _cache_key's hash.
+
+    Async because _read_via_fstab awaits the mount plugin's async
+    handle(). _read_world itself is sync and stays that way — the
+    world store is sqlite, no I/O wait worth yielding for."""
+    if name.startswith("mnt/"):
+        return await _read_via_fstab(name[len("mnt/"):])
+    got = _read_world(name)
+    if got is None:
+        return None
+    body, version, ext = got
+    return body, f"world:v{version}", _ext_to_ct(ext)
 
 
 def _read_cached(key: str):
@@ -638,17 +727,26 @@ async def _call_gpu_device(prompt: str, scope) -> str:
     return text
 
 
-def _build_prompt(source_body, intent_hint: str, required_ct: str) -> str:
+def _build_prompt(source_body, intent_hint: str, required_ct: str,
+                  source_ct: str) -> str:
     """SYSTEM_PROMPT + user frame, inlined into a single blob for
     /dev/gpu. Most gpu backends don't expose the system-role
     distinction (ollama's `prompt` field, openai-compat's single-user-
     message pattern), so we prepend. Loses some model 'authority'
     on system instructions but works uniformly across every backend
-    gpu.py supports."""
+    gpu.py supports.
+
+    source_ct carries the MIME the source declared (world ext -> CT,
+    or /mnt adapter's _ct). The SLM is told this explicitly so it
+    can interpret structured sources correctly before reshaping — a
+    JSON source reshaped as CSV is a different job from a plain-text
+    source reshaped as CSV, and the SLM only knows which path it's on
+    if we say so here."""
     return (
         SYSTEM_PROMPT
         + "\n\n---\n\n"
         + f"REQUIRED_CONTENT_TYPE: {required_ct}\n"
+        + f"SOURCE_CONTENT_TYPE: {source_ct}\n"
         + f"INTENT_HINT: {intent_hint or '(none)'}\n"
         + f"<<<SOURCE CONTENT>>>\n{_safe_source(source_body)}\n<<<END SOURCE>>>\n"
     )
@@ -703,17 +801,23 @@ async def handle(method, body, params):
     accept_list = _parse_accept(accept_hdr)
     accept_canon = _canonicalise_accept(accept_list)
 
-    # 3. Source world must exist.
-    src = _read_world(world_name)
+    # 3. Source must resolve. _read_source dispatches between the
+    #    world store (existing behaviour) and /mnt/* mounts declared
+    #    in /etc/fstab (sidecar Phase 1). Same (body, version, ct)
+    #    shape both ways, so the rest of handle() stays source-agnostic.
+    src = await _read_source(world_name)
     if src is None:
         return {"_status": 404, "error": f"world not found: {world_name}"}
-    body_src, version, _ext = src
+    body_src, version_token, source_ct = src
 
-    # 4. Cache key. GPU config fingerprint is computed per request so
-    #    operator backend swaps via PUT /home/etc/gpu.conf naturally
-    #    rotate the cache without any semantic reload.
+    # 4. Cache key. version_token is the per-source bump signal —
+    #    "world:v<N>" for world-backed sources, "mount:<token>" for
+    #    mount-backed (mtime_ns / etag / len+head). GPU config
+    #    fingerprint is computed per request so operator backend swaps
+    #    via PUT /home/etc/gpu.conf naturally rotate the cache without
+    #    any semantic reload.
     gpu_fp = _gpu_conf_fingerprint()
-    key = _cache_key(world_name, version, ua, accept_canon, gpu_fp)
+    key = _cache_key(world_name, version_token, ua, accept_canon, gpu_fp)
     hit = _read_cached(key)
     if hit is not None:
         body_c, ct, shape = hit
@@ -740,7 +844,7 @@ async def handle(method, body, params):
     #    POST auth check sees the same Authorization header that
     #    cleared our own dispatcher-level AUTH="auth" gate.
     required_ct = _pick_required_ct(accept_list)
-    prompt = _build_prompt(body_src, ua, required_ct)
+    prompt = _build_prompt(body_src, ua, required_ct, source_ct)
     try:
         raw_text = await _call_gpu_device(prompt, scope)
     except _SLMUnavailable as e:
