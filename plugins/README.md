@@ -38,24 +38,37 @@ is a higher-layer plugin that composes on top of `/dev/gpu`.
 
 Plugins are not auto-loaded from the repo checkout. They are staged into
 `/lib/<name>` and then activated. The `install.sh` / `install.ps1`
-helpers wrap the two-PUT dance:
+helpers wrap the two-PUT dance.
+
+You can either install one plugin at a time, or install the official
+machine-primitives set in one command:
 
 ```bash
-# One plugin, one command:
 export ELASTIK_TOKEN=your-t2-token
 export ELASTIK_APPROVE_TOKEN=your-t3-token
+
+# one plugin:
 ./plugins/install.sh gpu
-./plugins/install.sh fstab
-./plugins/install.sh semantic
+
+# official primitive set:
+./plugins/install.sh primitives
+
+# primitive set + semantic layer:
+./plugins/install.sh primitives --with-semantic
 ```
 
 ```powershell
-# PowerShell
 $env:ELASTIK_TOKEN="your-t2-token"
 $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+
+# one plugin:
 .\plugins\install.ps1 gpu
-.\plugins\install.ps1 fstab
-.\plugins\install.ps1 semantic
+
+# official primitive set:
+.\plugins\install.ps1 primitives
+
+# primitive set + semantic layer:
+.\plugins\install.ps1 primitives -WithSemantic
 ```
 
 If you do not want to set env vars first, PowerShell can also pass the
@@ -63,6 +76,7 @@ token explicitly:
 
 ```powershell
 .\plugins\install.ps1 gpu -Token "your-t3-token"
+.\plugins\install.ps1 primitives -Token "your-t3-token"
 ```
 
 The raw HTTP form (what the helpers run for you):
@@ -77,7 +91,15 @@ curl -X PUT http://localhost:3005/lib/example/state \
   --data-binary "active"
 ```
 
-Same pattern for every plugin in the table above.
+`primitives` expands to:
+
+- `gpu`
+- `fstab`
+- `db`
+- `fanout`
+
+`semantic` stays opt-in because it builds on `/dev/gpu` rather than
+being part of the minimal blind device/mount/query/broadcast base.
 
 ## What does NOT belong here
 

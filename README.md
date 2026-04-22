@@ -228,8 +228,10 @@ curl -X DELETE http://localhost:3005/lib/example \
 ```
 
 The repo ships the following plugins in `plugins/`. None auto-load.
-Install each one via `./plugins/install.sh <name>` (or the PowerShell
-twin `./plugins/install.ps1 <name>` on Windows).
+Install one by name via `./plugins/install.sh <name>` (or the
+PowerShell twin `./plugins/install.ps1 <name>` on Windows), or use the
+official primitive-set target to bootstrap a complete machine surface in
+one shot.
 
 First time, set the token env vars in the shell where you will run the
 helper:
@@ -238,16 +240,30 @@ helper:
 # bash/zsh
 export ELASTIK_TOKEN=your-t2-token
 export ELASTIK_APPROVE_TOKEN=your-t3-token
+
+# one plugin:
 ./plugins/install.sh gpu
-./plugins/install.sh semantic
+
+# official machine-primitives set:
+./plugins/install.sh primitives
+
+# primitive set + semantic shaping:
+./plugins/install.sh primitives --with-semantic
 ```
 
 ```powershell
 # PowerShell
 $env:ELASTIK_TOKEN="your-t2-token"
 $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+
+# one plugin:
 .\plugins\install.ps1 gpu
-.\plugins\install.ps1 semantic
+
+# official machine-primitives set:
+.\plugins\install.ps1 primitives
+
+# primitive set + semantic shaping:
+.\plugins\install.ps1 primitives -WithSemantic
 ```
 
 | File | Routes | Role |
@@ -264,6 +280,16 @@ $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
 device, blind mount, blind query, blind broadcast. Each has a config
 world under `/etc/<plugin>` or `/etc/<plugin>.conf`, so runtime
 behaviour swaps by `PUT /etc/...` without a plugin reload.
+
+The `primitives` install target expands exactly to:
+
+- `gpu`
+- `fstab`
+- `db`
+- `fanout`
+
+`semantic` is left opt-in because it composes on top of `/dev/gpu`
+rather than being part of the minimal blind primitive base.
 
 ### Mount anything
 
