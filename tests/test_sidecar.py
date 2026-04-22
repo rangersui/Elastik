@@ -75,13 +75,19 @@ UPSTREAM_URL = f"http://127.0.0.1:{UPSTREAM_PORT}"
 # fake upstream (stdlib http.server in a thread)
 # ====================================================================
 
+# Must match plugins/fstab.py:_MAX_FILE. Locked here so the cap-trip
+# assertion is a real regression test even if the fstab constant drifts.
+_FSTAB_MAX_FILE = 5 * 1024 * 1024
+
+
 class _FakeUpstream(http.server.BaseHTTPRequestHandler):
     """Canned responses for the https:// adapter to proxy.
 
     /ping       -> 200 text/plain "pong", ETag present  (tests etag version)
     /json       -> 200 application/json, no ETag         (tests len+head version)
+    /echo-auth  -> 200 echoes Authorization header        (tests bearer= opt)
     /boom       -> 500                                    (tests status passthrough)
-    /slow       -> sleeps past timeout                    (tests timeout -> 502)
+    /big        -> 200 _FSTAB_MAX_FILE+1 bytes            (tests upstream cap)
     anything    -> 404
     """
     def do_GET(self):
@@ -110,6 +116,21 @@ class _FakeUpstream(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"upstream exploded")
+        elif self.path == "/big":
+            # One byte over the adapter cap. The adapter should trip
+            # at _MAX_FILE+1 without reading any further. Client-side
+            # urlopen may not actually drain past that, and we don't
+            # wait for it to — TCPServer's daemon thread will GC the
+            # half-written response when the adapter closes.
+            payload = b"x" * (_FSTAB_MAX_FILE + 1)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass                # adapter closed early — expected
         else:
             self.send_response(404)
             self.end_headers()
@@ -254,6 +275,12 @@ def run():
               encoding="utf-8") as f:
         f.write("nested")
 
+    # Separate rw dir so the POST/read-back path has a real target that
+    # the read-only /mnt/local cannot provide. Preserving the rw write
+    # contract is the most compatibility-sensitive promise in B.1; this
+    # mount locks it in.
+    rw_mount_root = tempfile.mkdtemp(prefix="elastik-sidecar-localfs-rw-")
+
     upstream = _start_fake_upstream(UPSTREAM_PORT)
     proc, tmp_root = _start_elastik()
 
@@ -268,14 +295,15 @@ def run():
         if not ok:
             return
 
-        # Write fstab with three lines: file + https + (bogus scheme for 501 test)
+        # fstab: file+ro / file+rw / http+ro / http+ro+bearer / bogus-scheme
         fstab_lines = "\n".join([
             f"{local_mount_root}  /mnt/local  ro",
+            f"{rw_mount_root}  /mnt/rw  rw",
             f"http://127.0.0.1:{UPSTREAM_PORT}  /mnt/remote  ro",
             f"http://127.0.0.1:{UPSTREAM_PORT}  /mnt/authed  ro,bearer=sekret",
             "nothing://somewhere  /mnt/unk  ro",
         ]) + "\n"
-        test("write /etc/fstab with 4 mounts", _write_fstab(fstab_lines))
+        test("write /etc/fstab with 5 mounts", _write_fstab(fstab_lines))
 
         # ---- /mnt/ listing preserves v0.1 shape ------------------
         s, h, body = _http("GET", "/mnt/", token=TOKEN)
@@ -343,6 +371,59 @@ def run():
              s in (400, 403),
              f"got {s} -- traversal NOT blocked")
 
+        # ---- file:// rw write path (regression coverage) ---------
+        # Preserves the authenticated write contract: POST with bearer
+        # token -> 200 ack; content actually hits disk; read-back
+        # through the same adapter returns the written bytes; ro
+        # mount still refuses POST with 405.
+        #
+        # NOTE on the 401 branch: fstab.py's `if not _check_auth(scope)`
+        # gate lives in server.py:287. Since the f98e8e7 "localhost
+        # bypass" fix, any request from 127.0.0.1 returns "auth" even
+        # without a bearer header — so the 401 case is unreachable from
+        # a local test runner. The gate is covered by test_plugins.py's
+        # non-localhost cases; here we lock in that the gate is wired
+        # into the rewritten dispatch at all (ack proves auth ran).
+        payload = b"written by test"
+
+        s, _, body = _http("POST", "/mnt/rw/hello.txt", body=payload,
+                           token=TOKEN,
+                           headers={"Content-Type": "text/plain"})
+        test("rw POST with auth -> 200",
+             s == 200, f"got {s} body={body[:200]!r}")
+        try:
+            ack = json.loads(body.decode("utf-8"))
+        except Exception:
+            ack = None
+        test("rw POST ack shape {ok, path, size} preserved",
+             (isinstance(ack, dict)
+              and ack.get("ok") is True
+              and ack.get("path") == "hello.txt"
+              and ack.get("size") == len(payload)),
+             f"ack={ack}")
+
+        # Bytes hit disk
+        try:
+            with open(os.path.join(rw_mount_root, "hello.txt"), "rb") as f:
+                on_disk = f.read()
+        except OSError as e:
+            on_disk = f"<OSError: {e}>".encode()
+        test("rw POST wrote bytes to disk byte-for-byte",
+             on_disk == payload, f"disk={on_disk!r}")
+
+        # Read-back through the same adapter
+        s, _, body = _http("GET", "/mnt/rw/hello.txt", token=TOKEN)
+        test("rw read-back -> 200 with same bytes",
+             s == 200 and body == payload,
+             f"got s={s} body={body[:80]!r}")
+
+        # ro mount still rejects POST (405), auth or not
+        s, _, _ = _http("POST", "/mnt/local/nope.txt",
+                        body=b"should not land", token=TOKEN,
+                        headers={"Content-Type": "text/plain"})
+        test("ro mount POST -> 405 (even with auth)",
+             s == 405, f"got {s}")
+
         # ---- https:// adapter ------------------------------------
         s, h, body = _http("GET", "/mnt/remote/ping", token=TOKEN)
         test("http adapter GET -> 200", s == 200, f"got {s}")
@@ -381,6 +462,14 @@ def run():
         test("http adapter rejects POST -> 405",
              s == 405, f"got {s} -- https adapter accepted a write?")
 
+        # Upstream bigger than _MAX_FILE -> 413 before the body drains
+        # into memory. /mnt/* is unauthenticated (AUTH="none"), so an
+        # unbounded read would let any configured remote mount proxy
+        # arbitrarily large upstream bodies. Cap must be enforced.
+        s, _, body = _http("GET", "/mnt/remote/big", token=TOKEN)
+        test("http adapter caps upstream body at _MAX_FILE -> 413",
+             s == 413, f"got {s} body={body[:200]!r}")
+
         # ---- dispatcher: unknown mount + unknown scheme ----------
         s, _, _ = _http("GET", "/mnt/not-a-mount/x", token=TOKEN)
         test("unknown mount -> 404", s == 404, f"got {s}")
@@ -394,6 +483,7 @@ def run():
         try: upstream.server_close()
         except Exception: pass
         shutil.rmtree(local_mount_root, ignore_errors=True)
+        shutil.rmtree(rw_mount_root, ignore_errors=True)
 
 
 def main():

@@ -232,7 +232,17 @@ def _adapter_file(entry, method, rest_path, params):
         st = os.stat(full)
         ver = f"mtime:{st.st_mtime_ns}"
         if os.path.isdir(full):
-            body = _listing_json_bytes(full, rest_path, entry["name"], entry["mode"])
+            # PermissionError on listdir or per-file stat(2) during
+            # iteration must surface as a clean 403, matching the
+            # single-file read path's PermissionError handler below.
+            # Before the refactor the old handler guarded listing the
+            # same way — keep that contract so unreadable mounts do
+            # not leak as 500s.
+            try:
+                body = _listing_json_bytes(
+                    full, rest_path, entry["name"], entry["mode"])
+            except PermissionError:
+                raise _AdapterFetchError("permission denied", status=403)
             return body, "application/json; charset=utf-8", ver
         # file read
         if st.st_size > _MAX_FILE:
@@ -304,10 +314,22 @@ def _adapter_https(entry, method, rest_path, params):
     req = _urlreq.Request(url, headers=headers, method="GET")
     try:
         with _urlreq.urlopen(req, timeout=_HTTPS_TIMEOUT) as resp:
-            body = resp.read()
+            # Bounded read — symmetric with the file adapter's
+            # _MAX_FILE cap. /mnt/* reads are unauthenticated by
+            # design (AUTH="none"), so an unbounded resp.read() would
+            # let any configured remote mount proxy arbitrarily large
+            # upstream bodies into memory. Reading _MAX_FILE + 1
+            # detects overflow without draining the socket past it.
+            body = resp.read(_MAX_FILE + 1)
+            if len(body) > _MAX_FILE:
+                raise _AdapterFetchError(
+                    f"upstream response too large (> {_MAX_FILE} bytes)",
+                    status=413)
             ct = resp.headers.get("Content-Type",
                                   "application/octet-stream")
             etag = resp.headers.get("ETag")
+    except _AdapterFetchError:
+        raise                                   # our own cap trip
     except _urlerr.HTTPError as e:
         raise _AdapterFetchError(
             f"upstream HTTP {e.code}", status=e.code)
