@@ -270,11 +270,11 @@ $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
 |---|---|---|
 | `plugins/example.py` | `/example` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
 | `plugins/reality.py` | `/__reality__`, `/self` | self-replicator — data tar.gz + source tar.gz |
-| `plugins/gpu.py` | `/dev/gpu` | AI as a device. Backend from `/etc/gpu.conf` (ollama / openai / claude / deepseek / vast) |
+| `plugins/gpu.py` | `/dev/gpu`, `/dev/gpu/stream` | AI as a device. One-shot + streaming sibling. Backend from `/etc/gpu.conf` (ollama / openai / claude / deepseek / vast) |
 | `plugins/fstab.py` | `/mnt/*` | Mount local directories AND external sources (https, http) under `/mnt/`. Mount table in `/etc/fstab`. Per-scheme adapters in the plugin. |
 | `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or **file-kind** `/mnt/*` mounts. http(s) mounts reject with 400. |
 | `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
-| `plugins/semantic.py` | `/shaped/*` | Accept / User-Agent driven shape renderer. Delegates to `/dev/gpu`. See `PLAN-semantic-http.md`. |
+| `plugins/semantic.py` | `/shaped/*` | Accept-driven shape renderer. `text/event-stream` in Accept turns on SSE outer transport; `X-Semantic-Intent` is the browser-safe hint override when you cannot set `User-Agent`. Delegates to `/dev/gpu` or `/dev/gpu/stream`. |
 
 `gpu / fstab / db / fanout` form a **machine-primitives set** — blind
 device, blind mount, blind query, blind broadcast. Each has a config
@@ -290,6 +290,38 @@ The `primitives` install target expands exactly to:
 
 `semantic` is left opt-in because it composes on top of `/dev/gpu`
 rather than being part of the minimal blind primitive base.
+
+### `/shaped/*` today
+
+`/shaped/*` is still a **header-driven API** first.
+
+Canonical test path today:
+
+- `curl` for exact headers
+- or a browser extension / devtool that can edit request headers
+
+The minimum useful streaming request is:
+
+```bash
+curl -N "http://localhost:3005/shaped/home/retro" \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  -H "Accept: text/event-stream, text/html" \
+  -H "X-Semantic-Intent: grandma/1.0 (big-font, no-jargon)"
+```
+
+Notes:
+
+- `Accept: text/event-stream, <inner-mime>` means:
+  - outer transport = SSE
+  - inner shape = `<inner-mime>`
+- browsers cannot reliably override `User-Agent`, so browser tests should
+  send `X-Semantic-Intent` instead
+- plain `Accept: text/html` is a normal one-shot shaped response, **not**
+  the streaming path
+
+Dedicated `/shaped/*` browser UX is intentionally deferred. A proper
+`shaped.html` / browser-side shell is future work and **not part of this
+merge**; today the supported story is still "set the headers you want."
 
 ### Mount anything
 

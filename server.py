@@ -93,6 +93,30 @@ _PUBLIC_SHELL = {
     "/manifest.json", "/sw.js", "/opensearch.xml",
     "/favicon.ico", "/icon.png", "/icon-192.png",
 }
+
+
+def _wants_shaped_shell(method, path, accept):
+    """Browser GET /shaped/<world> -> app shell, not one-shot rendered body.
+
+    curl and programmatic callers still hit the raw /shaped/* API. This
+    only catches obvious browser navigations so the tab can stream and
+    append HTML inside the existing shell.
+    """
+    if method not in ("GET", "HEAD"):
+        return False
+    if not path.startswith("/shaped/"):
+        return False
+    a = (accept or "").lower()
+    if not a.startswith("text/html"):
+        return False
+    if "text/event-stream" in a:
+        return False
+    return (
+        "application/xhtml+xml" in a
+        or "application/xml" in a
+        or "image/avif" in a
+        or "image/webp" in a
+    )
 _TRUST_HEADER = os.getenv("ELASTIK_TRUST_PROXY_HEADER", "").lower()
 _TRUST_FROM = []
 for _c in os.getenv("ELASTIK_TRUST_PROXY_FROM", "").split(","):
@@ -347,6 +371,12 @@ async def _public_gate(scope, receive, send, path, method):
     """
     if not APPROVE_TOKEN: return None
     if path in _PUBLIC_SHELL: return None
+    accept = ""
+    for k, v in scope.get("headers", []):
+        if k == b"accept":
+            accept = v.decode()
+            break
+    if _wants_shaped_shell(method, path, accept): return None
     ip = _real_ip(scope)
     if ip.startswith("127.") or ip == "::1": return None
     if _check_auth(scope): return None
@@ -732,7 +762,16 @@ async def app(scope, receive, send):
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
 
-    # (auth gate moved to top of app — see above)
+    accept = ""
+    for k, v in scope.get("headers", []):
+        if k == b"accept":
+            accept = v.decode()
+            break
+    if _wants_shaped_shell(method, path, accept):
+        return await send_r(send, 200, INDEX, "text/html", csp=True,
+                            head_only=(method == "HEAD"))
+
+    # (auth gate moved to top of app - see above)
     parts = [p for p in path.split("/") if p]
 
     # /bin/* → alias for plugin routes. /bin/grep = /grep. FHS executable namespace.

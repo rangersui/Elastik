@@ -532,15 +532,25 @@ def _evict_if_over_cap() -> None:
 # ====================================================================
 
 def _read_headers(scope) -> tuple:
-    """Extract (User-Agent, Accept) strings from the ASGI scope."""
+    """Extract (intent_hint, Accept) from the ASGI scope.
+
+    `X-Semantic-Intent` is a browser-friendly override for the hint
+    channel. Normal clients can keep using User-Agent; browser fetch
+    cannot reliably set that header, so shaped.html sends its hint here
+    instead. If the override is absent, we fall back to User-Agent for
+    backwards compatibility."""
     ua = b""
+    intent = b""
     accept = b""
     for k, v in scope.get("headers", []) or []:
-        if k == b"user-agent":
+        if k == b"x-semantic-intent":
+            intent = v
+        elif k == b"user-agent":
             ua = v
         elif k == b"accept":
             accept = v
-    return (ua.decode("utf-8", "replace"), accept.decode("utf-8", "replace"))
+    hint = intent or ua
+    return (hint.decode("utf-8", "replace"), accept.decode("utf-8", "replace"))
 
 
 def _parse_accept(hdr: str):

@@ -26,7 +26,7 @@ Rule of thumb:
 | `fstab.py` | `/mnt/*` | blind mount of **any registered URI scheme** (file + http/https in Phase 1; postgres/s3/redis in later phases); mount table in `/etc/fstab`; per-scheme adapters in the plugin |
 | `db.py` | `/dev/db` | read-only SQL over worlds or **file-kind** fstab mounts; non-file mounts (http/https/…) reject with 400 — use `/mnt/<name>/<path>` for raw bytes |
 | `fanout.py` | `/dev/fanout` | broadcast one write to N worlds; target list in `/etc/fanout.conf` |
-| `semantic.py` | `/shaped/*` | Accept/User-Agent driven shape renderer; `text/event-stream` in Accept triggers SSE outer transport with inner MIME picked from the rest of the list; delegates to `/dev/gpu` (one-shot) or `/dev/gpu/stream` |
+| `semantic.py` | `/shaped/*` | Accept-driven shape renderer; `text/event-stream` in Accept triggers SSE outer transport with inner MIME picked from the rest of the list; `X-Semantic-Intent` is the browser-safe hint override when `User-Agent` cannot be changed; delegates to `/dev/gpu` (one-shot) or `/dev/gpu/stream` |
 
 `gpu` / `fstab` / `db` / `fanout` form a **machine-primitives set** —
 blind device, blind mount, blind query, blind broadcast. Each has a
@@ -100,6 +100,27 @@ curl -X PUT http://localhost:3005/lib/example/state \
 
 `semantic` stays opt-in because it builds on `/dev/gpu` rather than
 being part of the minimal blind device/mount/query/broadcast base.
+
+## `/shaped/*` browser note
+
+Today `/shaped/*` is still primarily a **header contract**, not a
+finished browser product surface.
+
+Recommended testing today:
+
+- `curl` when you want exact control
+- or a browser header-editing tool when you want to watch the response in
+  a tab
+
+Browser caveat:
+
+- `User-Agent` is not reliably writable from browser JS, so semantic
+  accepts `X-Semantic-Intent` as the explicit hint override
+
+Deferred on purpose:
+
+- a dedicated `shaped.html` shell / polished browser UI is future work
+- it is **not** part of the current merge target
 
 ## What does NOT belong here
 
