@@ -2,6 +2,8 @@
 
 *v5.0.0 lambda — one file runs it. Plugins are worlds.*
 
+A semantic HTTP server.
+
 You have an HTTP machine.
 
 It can store raw worlds like a pastebin.
