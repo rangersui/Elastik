@@ -342,11 +342,6 @@ def _check_auth(scope):
                     return _lookup_etc_auth(user, pwd)
                 except (ValueError, UnicodeDecodeError): pass
             break
-    # Localhost inherits the public gate's trust model: if the request
-    # originates on the machine, treat it as T2 even without a header.
-    ip = _real_ip(scope)
-    if ip.startswith("127.") or ip == "::1":
-        return "auth"
     return None
 
     # _check_url_auth — injected by url_auth plugin if installed.

@@ -77,7 +77,7 @@ import server
 # plugin metadata
 # ====================================================================
 
-AUTH = "auth"               # T2 bearer or localhost (public_gate).
+AUTH = "auth"               # T2 auth at the plugin gate; browser shell is separate.
 ROUTES = ["/shaped"]
 
 # Route we dispatch to for the actual model call. Must match

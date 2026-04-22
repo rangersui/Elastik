@@ -521,28 +521,34 @@ def run_layer2():
         test("SLM-down + no Accept -> 200 fallback-raw",
              s == 200 and h.get("X-Semantic-Cache") == "fallback-raw")
 
-        # --- regression: localhost + no Authorization header reaches the
-        #     handler (was 403 before the _check_auth localhost bypass;
-        #     was an auto man-page before the base_path == matched guard
-        #     on the dispatcher). Both fixes must hold for this to pass.
+        # --- browser shell vs raw API auth boundary ---
+        # Browser navigation to /shaped/<world> is allowed through to the
+        # app shell on localhost, but the raw /shaped/* API itself remains
+        # header-driven: a bare no-auth API call should still 403.
         s, h, body = _http(
             "GET", "/shaped/home/smoke", token="",
-            headers={"Accept": "text/html", "User-Agent": "grandma/1.0 (big-font)"},
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "User-Agent": "Mozilla/5.0 semantic-test",
+            },
         )
-        test("localhost no-auth GET /shaped/<world> is NOT 403",
-             s != 403, f"got HTTP {s} -- localhost bypass missing?")
-        test("localhost no-auth GET /shaped/<world> reaches plugin (X-Semantic-Cache set)",
-             bool(h.get("X-Semantic-Cache")),
-             f"handler did not run; headers={list(h.keys())} body={body[:150]!r}")
+        test("localhost no-auth browser GET /shaped/<world> -> shell 200",
+             s == 200, f"got HTTP {s}")
+        test("localhost browser GET /shaped/<world> returns shell HTML",
+             h.get("content-type", "").startswith("text/html") and "<!doctype html" in body[:200].lower(),
+             f"headers={h} body={body[:150]!r}")
+        test("localhost browser GET /shaped/<world> does NOT hit semantic handler",
+             not h.get("X-Semantic-Cache"),
+             f"unexpected handler headers={h}")
         test("localhost /shaped/<subpath> does NOT serve auto man-page",
              'action="/shaped"' not in body,
              "dispatcher man-page leaked into subpath response")
-
-        # --- unauthenticated request -> 403 (AUTH='auth', non-local proxy sim) --
-        # Note: localhost on 127.0.0.1 is always allowed (public_gate +
-        # _check_auth localhost bypass). Testing the 403 branch requires
-        # impersonating a remote client via X-Forwarded-For + TRUST_PROXY
-        # env; covered by test_plugins.py's general auth suite, not here.
+        s, _, _ = _http(
+            "GET", "/shaped/home/smoke", token="",
+            headers={"Accept": "text/html", "User-Agent": "grandma/1.0 (big-font)"},
+        )
+        test("localhost no-auth raw /shaped API -> 403",
+             s == 403, f"got HTTP {s}")
 
         # --- v0.2 regressions: fallback-raw gated by top-q + Accept `*` ---
         # These test the semantic v0.2 hardening: raw-fallback is only
