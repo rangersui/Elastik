@@ -581,13 +581,29 @@ def _read_fstab():
     contains only blank/comment/malformed lines. Callers treat an
     empty list the same way they'd treat a missing fstab — "no
     mounts are defined" — so no separate signalling is needed.
+
+    **Pure read, no side effect.** Opens the world's SQLite file
+    directly on the filesystem path rather than going through
+    conn(), because conn() auto-creates missing worlds as a side
+    effect — a bare /dev/db?file=... probe on a system without a
+    fstab must NOT silently materialise an empty /etc/fstab world.
+    The pre-refactor db.py read the fstab path the same way for
+    the same reason; this helper preserves that property while
+    consolidating the parser.
     """
+    fstab_db = DATA / _disk_name("etc/fstab") / "universe.db"
+    if not fstab_db.exists():
+        return []
     try:
-        raw = conn("etc/fstab").execute(
+        c = sqlite3.connect(str(fstab_db))
+        c.row_factory = sqlite3.Row
+        row = c.execute(
             "SELECT stage_html FROM stage_meta WHERE id=1"
-        ).fetchone()["stage_html"]
+        ).fetchone()
+        c.close()
     except Exception:
         return []
+    raw = row["stage_html"] if row else b""
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
     entries = []
