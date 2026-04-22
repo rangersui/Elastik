@@ -81,6 +81,22 @@ ELASTIK_TOKEN=your-t2-token
 ELASTIK_APPROVE_TOKEN=your-t3-token
 ```
 
+The examples below assume those env vars are already present in your shell.
+If they are not, either export/set them first, or replace the `$...TOKEN`
+placeholders with literal bearer tokens by hand.
+
+```bash
+# bash/zsh
+export ELASTIK_TOKEN=your-t2-token
+export ELASTIK_APPROVE_TOKEN=your-t3-token
+```
+
+```powershell
+# PowerShell
+$env:ELASTIK_TOKEN="your-t2-token"
+$env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+```
+
 ## Capability tokens
 
 Give an AI a path-scoped key instead of the full T2/T3 token.
@@ -211,12 +227,193 @@ curl -X DELETE http://localhost:3005/lib/example \
   -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN"
 ```
 
-The repo ships two specimens in `plugins/`. Neither is auto-loaded.
+The repo ships the following plugins in `plugins/`. None auto-load.
+Install one by name via `./plugins/install.sh <name>` (or the
+PowerShell twin `./plugins/install.ps1 <name>` on Windows), or use the
+official primitive-set target to bootstrap a complete machine surface in
+one shot.
 
-| File | Shape |
-|---|---|
-| `plugins/example.py` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
-| `plugins/reality.py` | self-replicator — GET `/__reality__` (data tar.gz) + GET `/self` (source tar.gz) |
+First time, set the token env vars in the shell where you will run the
+helper:
+
+```bash
+# bash/zsh
+export ELASTIK_TOKEN=your-t2-token
+export ELASTIK_APPROVE_TOKEN=your-t3-token
+
+# one plugin:
+./plugins/install.sh gpu
+
+# official machine-primitives set:
+./plugins/install.sh primitives
+
+# primitive set + semantic shaping:
+./plugins/install.sh primitives --with-semantic
+```
+
+```powershell
+# PowerShell
+$env:ELASTIK_TOKEN="your-t2-token"
+$env:ELASTIK_APPROVE_TOKEN="your-t3-token"
+
+# one plugin:
+.\plugins\install.ps1 gpu
+
+# official machine-primitives set:
+.\plugins\install.ps1 primitives
+
+# primitive set + semantic shaping:
+.\plugins\install.ps1 primitives -WithSemantic
+```
+
+| File | Routes | Role |
+|---|---|---|
+| `plugins/example.py` | `/example` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
+| `plugins/reality.py` | `/__reality__`, `/self` | self-replicator — data tar.gz + source tar.gz |
+| `plugins/gpu.py` | `/dev/gpu`, `/dev/gpu/stream` | AI as a device. One-shot + streaming sibling. Backend from `/etc/gpu.conf` (ollama / openai / claude / deepseek / vast) |
+| `plugins/fstab.py` | `/mnt/*` | Mount local directories AND external sources (https, http) under `/mnt/`. Mount table in `/etc/fstab`. Per-scheme adapters in the plugin. |
+| `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or **file-kind** `/mnt/*` mounts. http(s) mounts reject with 400. |
+| `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
+| `plugins/semantic.py` | `/shaped/*` | Accept-driven shape renderer. `text/event-stream` in Accept turns on SSE outer transport; `X-Semantic-Intent` is the browser-safe hint override when you cannot set `User-Agent`. Delegates to `/dev/gpu` or `/dev/gpu/stream`. |
+
+`gpu / fstab / db / fanout` form a **machine-primitives set** — blind
+device, blind mount, blind query, blind broadcast. Each has a config
+world under `/etc/<plugin>` or `/etc/<plugin>.conf`, so runtime
+behaviour swaps by `PUT /etc/...` without a plugin reload.
+
+The `primitives` install target expands exactly to:
+
+- `gpu`
+- `fstab`
+- `db`
+- `fanout`
+
+`semantic` is left opt-in because it composes on top of `/dev/gpu`
+rather than being part of the minimal blind primitive base.
+
+### `/shaped/*` today
+
+`/shaped/*` is still a **header-driven API** first.
+
+Canonical test path today:
+
+- `curl` for exact headers
+- or a browser extension / devtool that can edit request headers
+
+The minimum useful streaming request is:
+
+```bash
+curl -N "http://localhost:3005/shaped/home/retro" \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  -H "Accept: text/event-stream, text/html" \
+  -H "X-Semantic-Intent: grandma/1.0 (big-font, no-jargon)"
+```
+
+Notes:
+
+- `Accept: text/event-stream, <inner-mime>` means:
+  - outer transport = SSE
+  - inner shape = `<inner-mime>`
+- browsers cannot reliably override `User-Agent`, so browser tests should
+  send `X-Semantic-Intent` instead
+- plain `Accept: text/html` is a normal one-shot shaped response, **not**
+  the streaming path
+
+Dedicated `/shaped/*` browser UX is intentionally deferred. A proper
+`shaped.html` / browser-side shell is future work and **not part of this
+merge**; today the supported story is still "set the headers you want."
+
+### Mount anything
+
+`plugins/fstab.py` mounts **any URI scheme with a registered adapter**
+under `/mnt/*`. Phase 1 ships `file` (local directories) and `http` /
+`https` (remote HTTP endpoints). Files that live outside elastik —
+your projects folder, a browser history SQLite, an internal JSON API,
+Excel `.xlsm`, images, a music library — all become readable through
+elastik's HTTP surface via one uniform `/mnt/<name>/<path>` form.
+
+Install first (it is a plugin, not core):
+
+```bash
+./plugins/install.sh fstab
+```
+
+Then write `/etc/fstab` — one line per mount, `source  /mnt/name  mode[,opts]`:
+
+```bash
+curl -X PUT http://localhost:3005/etc/fstab \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" \
+  --data-binary @- <<'EOF'
+/Users/ranger/projects  /mnt/work   rw
+/home/ranger/docs       /mnt/docs   ro
+/Users/ranger/Library/Application Support/BraveSoftware/Brave-Browser/Default  /mnt/brave  ro
+https://api.example.com  /mnt/api   ro,bearer=xyz
+http://10.0.0.5:8080     /mnt/intra ro
+EOF
+```
+
+Source column syntax:
+- **absolute local path** → `file` adapter (backwards-compatible with pre-v0.2 fstab)
+- **`scheme://endpoint`** → looked up in fstab's adapter table (`https`, `http` today; `postgres` / `s3` / `redis` in later phases)
+
+Mode column accepts comma-delimited opts. `ro` / `rw` is the mode;
+anything after the first comma is adapter-specific. The https adapter
+reads `bearer=<value>` and attaches it as the upstream `Authorization`
+header so `/mnt/api` can front an authenticated API without leaking
+the token to clients.
+
+Path with spaces (load-bearing example — Brave's profile path): the
+parser right-biases on `rsplit(None, 2)` so the mount-point and mode
+fields are always the last two whitespace-separated tokens; everything
+before them is one source path regardless of internal whitespace.
+
+Once mounted:
+
+```bash
+curl http://localhost:3005/mnt/                  # list mounts (all kinds)
+curl http://localhost:3005/mnt/work/             # directory listing (file)
+curl http://localhost:3005/mnt/brave/History     # read a file (file, raw bytes)
+curl http://localhost:3005/mnt/api/users/42      # proxy GET to https upstream
+```
+
+Response headers:
+- `Content-Type` — inferred from extension for file mounts; proxied from upstream for http(s)
+- `X-Mount-Version` — `mtime:<ns>` for file; `etag:<value>` or `len=N;head=<hex>` for http(s)
+
+`rw` mounts accept POST (file-kind only, write requires T2 auth);
+`ro` mounts are GET-only. https mounts are read-only in Phase 1
+regardless of mode (a POST to an http mount rejects with 405 before
+the upstream is contacted). http(s) reads are capped at 5 MB per
+response — /mnt/ is an unauthenticated surface (`AUTH="none"`) and
+an uncapped proxy would let any declared remote mount pull arbitrary
+bytes into memory.
+
+Writing to `/etc/fstab` requires T3 (approve) — that IS the permission
+model: what can enter the tree is decided by who can write the mount
+table.
+
+**Composes with `/dev/db`** for SQL over any file-kind external SQLite:
+
+```bash
+./plugins/install.sh db
+curl -X POST "http://localhost:3005/dev/db?file=brave/History" \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  -d "SELECT url FROM urls ORDER BY last_visit_time DESC LIMIT 10"
+```
+
+`?file=brave/History` resolves against the mount table: `brave/...`
+means "the file at this path under whatever local directory `/mnt/brave`
+points to." Read-only connection enforced at the SQLite layer.
+
+**`/dev/db` only accepts file-kind mounts.** SQLite can only open local
+files; an https mount pointed at `?file=api/whatever` rejects with a
+clean 400 naming the scheme — use `/mnt/<name>/<path>` for raw bytes
+over the adapter instead. Status matrix:
+
+- `?file=<file-mount>/<path>` → `200` if path exists, `404` if not
+- `?file=<http-mount>/<path>` → `400` wrong kind
+- `?file=<unknown-mount>/...` → `404` mount missing
+- path traversal (`..`) → `403`
 
 Any source-changing PUT resets `state=pending`, so approval re-binds to
 the new source hash. The chain records `stage_written` (with

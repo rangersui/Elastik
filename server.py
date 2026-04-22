@@ -93,6 +93,30 @@ _PUBLIC_SHELL = {
     "/manifest.json", "/sw.js", "/opensearch.xml",
     "/favicon.ico", "/icon.png", "/icon-192.png",
 }
+
+
+def _wants_shaped_shell(method, path, accept):
+    """Browser GET /shaped/<world> -> app shell, not one-shot rendered body.
+
+    curl and programmatic callers still hit the raw /shaped/* API. This
+    only catches obvious browser navigations so the tab can stream and
+    append HTML inside the existing shell.
+    """
+    if method not in ("GET", "HEAD"):
+        return False
+    if not path.startswith("/shaped/"):
+        return False
+    a = (accept or "").lower()
+    if not a.startswith("text/html"):
+        return False
+    if "text/event-stream" in a:
+        return False
+    return (
+        "application/xhtml+xml" in a
+        or "application/xml" in a
+        or "image/avif" in a
+        or "image/webp" in a
+    )
 _TRUST_HEADER = os.getenv("ELASTIK_TRUST_PROXY_HEADER", "").lower()
 _TRUST_FROM = []
 for _c in os.getenv("ELASTIK_TRUST_PROXY_FROM", "").split(","):
@@ -303,11 +327,11 @@ def _check_auth(scope):
                 tok = a[7:]
                 if "." in tok:
                     cap = _verify_cap(tok)
-                    if cap is None: return None
+                    if cap is None: break
                     prefix, _exp, mode = cap
                     if _path_in_scope(scope.get("path", "/"), prefix):
                         return f"cap:{mode}:{prefix}"
-                    return None
+                    break
                 if APPROVE_TOKEN and _hmac.compare_digest(tok, APPROVE_TOKEN): return "approve"
                 if AUTH_TOKEN and _hmac.compare_digest(tok, AUTH_TOKEN): return "auth"
             elif a.startswith("Basic "):
@@ -317,7 +341,7 @@ def _check_auth(scope):
                     if AUTH_TOKEN and _hmac.compare_digest(pwd, AUTH_TOKEN): return "auth"
                     return _lookup_etc_auth(user, pwd)
                 except (ValueError, UnicodeDecodeError): pass
-            return None
+            break
     return None
 
     # _check_url_auth — injected by url_auth plugin if installed.
@@ -342,6 +366,12 @@ async def _public_gate(scope, receive, send, path, method):
     """
     if not APPROVE_TOKEN: return None
     if path in _PUBLIC_SHELL: return None
+    accept = ""
+    for k, v in scope.get("headers", []):
+        if k == b"accept":
+            accept = v.decode()
+            break
+    if _wants_shaped_shell(method, path, accept): return None
     ip = _real_ip(scope)
     if ip.startswith("127.") or ip == "::1": return None
     if _check_auth(scope): return None
@@ -500,6 +530,114 @@ def conn(name):
         _db[name] = c
     return _db[name]
 
+
+# ── /etc/fstab shared parsing ──────────────────────────────────
+#
+# Lifted up from plugins/fstab.py so /dev/db and any future consumer
+# (e.g. /shaped/mnt/* pre-validation) can eat the same entry shape
+# the /mnt/ plugin produces. Grammar invariants are load-bearing and
+# must not change without bumping the fstab contract across ALL
+# consumers at once:
+#
+#   - rsplit(None, 2) for three-field parsing — source paths with
+#     spaces (Brave profile path) depend on this.
+#   - Source with "://" is scheme-tagged; source without is "file"
+#     (backwards-compat with pre-sidecar fstab lines).
+#   - mode column folds comma-delimited opts so each adapter reads
+#     its own (bearer=xyz etc.) without widening the grammar.
+#
+# Entry shape matches the dict plugins/fstab.py already emits so
+# existing callers don't have to be rewritten.
+
+def _parse_fstab_line(line):
+    """Parse one /etc/fstab line into an entry dict, or None.
+
+    Returns:
+      {"kind":   "file" | "http" | "https" | ...,
+       "source": str,              # local path OR scheme-body after `://`
+       "name":   str,              # /mnt/<name> suffix, slashes stripped
+       "mode":   "ro" | "rw",
+       "opts":   list[str]}        # e.g. ["bearer=xyz"]
+
+    Returns None for blank lines, comment lines (`#` prefix), and
+    malformed lines. mode defaults to "ro" if the token isn't one
+    of ro/rw. Mount points that don't start with `/mnt/` are
+    rejected (None).
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.rsplit(None, 2)
+    if len(parts) != 3:
+        return None
+    source, mount, mode_with_opts = parts
+
+    mode_tokens = mode_with_opts.split(",")
+    mode = mode_tokens[0].strip().lower()
+    opts = [t.strip() for t in mode_tokens[1:] if t.strip()]
+    if mode not in ("ro", "rw"):
+        mode = "ro"
+
+    if not mount.startswith("/mnt/"):
+        return None
+    name = mount[len("/mnt/"):].strip("/")
+    if not name:
+        return None
+
+    if "://" in source:
+        scheme, rest = source.split("://", 1)
+        return {"kind": scheme.lower(), "source": rest,
+                "name": name, "mode": mode, "opts": opts}
+    return {"kind": "file", "source": source,
+            "name": name, "mode": mode, "opts": opts}
+
+
+def _read_fstab():
+    """Return the full list of parsed fstab entries.
+
+    Reads the etc/fstab world's stage_html column and runs every
+    non-blank non-comment line through _parse_fstab_line. Invalid
+    lines drop silently — same forgiving-on-read policy /mnt/ has
+    always had; the permission model is "who can PUT /etc/fstab",
+    not "who can pass a grammar check."
+
+    Returns [] if etc/fstab doesn't exist yet, is unreadable, or
+    contains only blank/comment/malformed lines. Callers treat an
+    empty list the same way they'd treat a missing fstab — "no
+    mounts are defined" — so no separate signalling is needed.
+
+    **Pure read, no side effect.** Opens the world's SQLite file
+    directly on the filesystem path rather than going through
+    conn(), because conn() auto-creates missing worlds as a side
+    effect — a bare /dev/db?file=... probe on a system without a
+    fstab must NOT silently materialise an empty /etc/fstab world.
+    The pre-refactor db.py read the fstab path the same way for
+    the same reason; this helper preserves that property while
+    consolidating the parser.
+    """
+    fstab_db = DATA / _disk_name("etc/fstab") / "universe.db"
+    if not fstab_db.exists():
+        return []
+    try:
+        c = sqlite3.connect(str(fstab_db))
+        c.row_factory = sqlite3.Row
+        row = c.execute(
+            "SELECT stage_html FROM stage_meta WHERE id=1"
+        ).fetchone()
+        c.close()
+    except Exception:
+        return []
+    raw = row["stage_html"] if row else b""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    entries = []
+    for line in (raw or "").splitlines():
+        e = _parse_fstab_line(line)
+        if e is not None:
+            entries.append(e)
+    return entries
+
+
 def log_event(name, etype, payload=None):
     c = conn(name); p = json.dumps(payload or {}, ensure_ascii=False)
     row = c.execute("SELECT hmac FROM events ORDER BY id DESC LIMIT 1").fetchone()
@@ -619,7 +757,16 @@ async def app(scope, receive, send):
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
 
-    # (auth gate moved to top of app — see above)
+    accept = ""
+    for k, v in scope.get("headers", []):
+        if k == b"accept":
+            accept = v.decode()
+            break
+    if _wants_shaped_shell(method, path, accept):
+        return await send_r(send, 200, INDEX, "text/html", csp=True,
+                            head_only=(method == "HEAD"))
+
+    # (auth gate moved to top of app - see above)
     parts = [p for p in path.split("/") if p]
 
     # /bin/* → alias for plugin routes. /bin/grep = /grep. FHS executable namespace.
@@ -668,8 +815,9 @@ async def app(scope, receive, send):
         b = body_raw.decode("utf-8", "replace")
         qs = scope.get("query_string", b"").decode()
         params = _parse_qs(qs)
-        # Man page: browser GET, no query params, handler has docstring → show form
-        if method == "GET" and not qs:
+        # Man page: browser GET to the route root, no query params,
+        # handler has docstring → show form. Subpaths should dispatch.
+        if method == "GET" and not qs and base_path == matched:
             accept = ""
             for k, v in scope.get("headers", []):
                 if k == b"accept": accept = v.decode(); break
