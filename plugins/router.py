@@ -625,12 +625,17 @@ def _may_route() -> bool:
 # backend policy — /etc/gpu.conf scheme gate
 # ====================================================================
 
-def _backend_scheme() -> str:
-    """First-line scheme of /etc/gpu.conf, or '' if unset / unreadable.
-    Direct-path read — does NOT auto-create the gpu.conf world."""
+def _read_backend_conf():
+    """Return (scheme, endpoint) from /etc/gpu.conf, or ('', '').
+
+    Direct-path read — does NOT auto-create the gpu.conf world.
+    `endpoint` is everything after `scheme://` with trailing slashes
+    trimmed. `scheme` is lowercased. Missing file, malformed line,
+    or a line without `://` all map to the empty pair.
+    """
     db = server.DATA / server._disk_name(GPU_CONF_WORLD) / "universe.db"
     if not db.exists():
-        return ""
+        return "", ""
     try:
         import sqlite3
         c = sqlite3.connect(str(db))
@@ -640,7 +645,7 @@ def _backend_scheme() -> str:
         ).fetchone()
         c.close()
     except Exception:
-        return ""
+        return "", ""
     raw = (row["stage_html"] if row else b"") or b""
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
@@ -649,14 +654,97 @@ def _backend_scheme() -> str:
         if not s or s.startswith("#"):
             continue
         if "://" not in s:
-            return ""
-        return s.split("://", 1)[0].strip().lower()
-    return ""
+            return "", ""
+        scheme, rest = s.split("://", 1)
+        return scheme.strip().lower(), rest.strip().rstrip("/")
+    return "", ""
+
+
+def _backend_scheme() -> str:
+    """First-line scheme of /etc/gpu.conf, or '' if unset.
+    Kept for backwards-compat with earlier code paths that only
+    needed the scheme; new code should prefer _read_backend_conf()."""
+    return _read_backend_conf()[0]
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True iff `host` refers to this machine's own network stack.
+
+    Accepts:
+      - "localhost" (any case)
+      - any IPv4 in 127.0.0.0/8
+      - IPv6 ::1 (bracketed or bare)
+
+    Does NOT treat RFC1918 ranges (10.x, 192.168.x, 172.16/12) as
+    local — those are LAN addresses. Router's privacy posture is
+    "within my machine," not "within my subnet." An `ollama://
+    10.0.0.5:11434` endpoint still sends prompts off the host; the
+    exfiltration boundary the PLAN and README describe would leak.
+    """
+    if not host:
+        return False
+    h = host.strip()
+    # IPv6 with brackets: strip them for ipaddress parsing.
+    if h.startswith("[") and "]" in h:
+        h = h[1:h.index("]")]
+    if h.lower() == "localhost":
+        return True
+    # Try strict IP parsing. `ipaddress.ip_address` accepts both
+    # v4 and v6, raises ValueError for hostnames.
+    try:
+        import ipaddress
+        return ipaddress.ip_address(h).is_loopback
+    except (ValueError, ImportError):
+        return False
+
+
+def _split_host_port(endpoint: str):
+    """Extract the host portion of `scheme://host[:port][/path]`
+    endpoint form. Returns "" if the endpoint is empty or
+    unparseable.
+
+    Handles:
+      "127.0.0.1:11434"          -> "127.0.0.1"
+      "localhost:11434"          -> "localhost"
+      "api.example.com"          -> "api.example.com"
+      "api.example.com/path"     -> "api.example.com"
+      "[::1]:11434"              -> "::1"
+      "[2001:db8::1]:443/v1"     -> "2001:db8::1"
+    """
+    if not endpoint:
+        return ""
+    # Strip any path component first.
+    if "/" in endpoint:
+        endpoint = endpoint.split("/", 1)[0]
+    # Bracketed IPv6: [host]:port
+    if endpoint.startswith("["):
+        closing = endpoint.find("]")
+        if closing > 0:
+            return endpoint[1:closing]
+    # Otherwise it's host:port or bare host. If there's exactly one
+    # colon, assume host:port (IPv4 or hostname). Multiple colons
+    # means bare IPv6 without brackets — no port split possible.
+    if endpoint.count(":") == 1:
+        return endpoint.rsplit(":", 1)[0]
+    return endpoint
 
 
 def _backend_is_local() -> bool:
-    """True iff /etc/gpu.conf names a scheme in _LOCAL_SCHEMES."""
-    return _backend_scheme() in _LOCAL_SCHEMES
+    """True iff /etc/gpu.conf names a LOCAL backend — both the
+    scheme is in _LOCAL_SCHEMES AND the endpoint's host resolves
+    to a loopback address.
+
+    Scheme-only checks (the earlier implementation) let
+    `ollama://10.0.0.5:11434` pass the local-only policy even
+    though prompts and candidate names leave the machine. Codex
+    flagged this as P1 — privacy / exfiltration boundary defeated
+    by a LAN IP masquerading as local.
+    """
+    scheme, endpoint = _read_backend_conf()
+    if scheme not in _LOCAL_SCHEMES:
+        return False
+    host = _split_host_port(endpoint)
+    return _is_loopback_host(host)
 
 
 def _policy_allows_slm() -> bool:

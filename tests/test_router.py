@@ -638,7 +638,37 @@ def run():
              s == 404
              and h.get("x-semantic-route-cache") == "policy-static-404",
              f"got {s} cache={h.get('x-semantic-route-cache')}")
-        # Restore local so subsequent tests work.
+
+        # §15b. Local SCHEME but non-loopback ENDPOINT still rejects.
+        # Codex P1: scheme-only checks let `ollama://10.0.0.5:...` pass
+        # even though prompts leak off-host. Now _backend_is_local
+        # validates BOTH scheme ∈ _LOCAL_SCHEMES AND endpoint host is
+        # loopback (localhost / 127.0.0.0/8 / ::1). A LAN IP under
+        # ollama:// is non-local -> policy-static-404.
+        _write_gpu_conf("ollama://192.168.1.100:11434")
+        s, h, _ = _http("GET", "/salse-report-lan-ollama", token=TOKEN)
+        test("ollama://<LAN-IP> + LOCAL_ONLY=1 -> policy-static-404 "
+             "(scheme-only check would have passed this)",
+             s == 404
+             and h.get("x-semantic-route-cache") == "policy-static-404",
+             f"got {s} cache={h.get('x-semantic-route-cache')}")
+
+        _write_gpu_conf("ollama://api.example.com")
+        s, h, _ = _http("GET", "/salse-report-remote-ollama", token=TOKEN)
+        test("ollama://<public-host> + LOCAL_ONLY=1 -> policy-static-404",
+             s == 404
+             and h.get("x-semantic-route-cache") == "policy-static-404",
+             f"got {s} cache={h.get('x-semantic-route-cache')}")
+
+        # §15c. Loopback variants STILL pass. Guards against an
+        # over-corrective fix that accidentally breaks localhost.
+        _write_gpu_conf(f"ollama://localhost:{OLLAMA_PORT}")
+        s, h, _ = _http("GET", "/salse-report-localhost", token=TOKEN)
+        test("ollama://localhost + LOCAL_ONLY=1 -> allowed",
+             s == 303,
+             f"got {s} cache={h.get('x-semantic-route-cache')}")
+
+        # Restore canonical local for subsequent tests.
         _write_gpu_conf(f"ollama://127.0.0.1:{OLLAMA_PORT}")
 
         # ---------------------------------------------------------
