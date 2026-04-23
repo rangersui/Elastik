@@ -315,6 +315,7 @@ $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
 | `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or **file-kind** `/mnt/*` mounts. http(s) mounts reject with 400. |
 | `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
 | `plugins/semantic.py` | `/shaped/*` | Accept-driven shape renderer. `text/event-stream` in Accept turns on SSE outer transport; `X-Semantic-Intent` is the browser-safe hint override when you cannot set `User-Agent`. Delegates to `/dev/gpu` or `/dev/gpu/stream`. |
+| `plugins/router.py` | `/_router_fallback` (hook-only) | **opt-in** SLM-assisted resolver for unmatched paths. Converts "no such world" into `303`/`300`/`404-with-prose` based on the caller's readable pool. Caller-scoped candidates, separate rate cap, local-only backend by default. Covers top-level natural-language URLs (`/salse-report`, `/帮我画销售饼图`); `/home/<typo>` requires follow-up server.py plumbing. See `plugins/README.md` for the install + safety posture. |
 
 `gpu / fstab / db / fanout` form a **machine-primitives set** — blind
 device, blind mount, blind query, blind broadcast. Each has a config
@@ -329,7 +330,13 @@ The `primitives` install target expands exactly to:
 - `fanout`
 
 `semantic` is left opt-in because it composes on top of `/dev/gpu`
-rather than being part of the minimal blind primitive base.
+rather than being part of the minimal blind primitive base. `router`
+is also opt-in, for the same reason plus its distinct safety
+posture — see `plugins/README.md` § "Semantic router" for the full
+install + backend-policy + URL-privacy notes. Short version: router
+turns elastik's default 404 into a SLM-assisted resolver that
+respects the caller's auth-scoped pool and refuses to call
+non-local backends unless explicitly opted in.
 
 ### `/shaped/*` today
 
