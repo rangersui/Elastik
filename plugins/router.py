@@ -702,17 +702,34 @@ async def _call_router_slm(prompt: str, scope) -> dict:
       {"kind": "multi",  "candidates": ["<name>", ...]}
       {"kind": "none",   "prose": "<one sentence>"}
 
-    Raises _RouterSLMUnavailable on any backend failure."""
+    Raises _RouterSLMUnavailable on any backend failure.
+
+    Auth bridge: router is the canonical *trusted internal caller*
+    of /dev/gpu. The whole point of router is resolving typo /
+    natural-language URLs for anonymous (T1) users who are neither
+    authenticated against /dev/gpu nor will ever be. gpu.py's
+    inline POST auth gate would 401 every T1 router call if we
+    forwarded the original scope unchanged.
+
+    Fix: stamp an `_internal_caller = "router"` sentinel into a
+    COPY of the caller's scope before handing it to gpu's handler.
+    gpu.py treats this as "trusted loopback, bypass auth, keep the
+    rate cap and cost accounting." The sentinel is a top-level ASGI
+    scope key — server-constructed only, not settable from an HTTP
+    header — so it cannot be forged from outside. Same non-
+    forgeability the `_router_triggered` sentinel in server.py
+    depends on.
+
+    Every /dev/gpu and /dev/gpu/stream audit event now carries a
+    `"caller"` field so operators reviewing logs can see which
+    subset of SLM traffic came from router vs direct external use.
+    """
     gpu_handler = server._plugins.get(GPU_ROUTE)
     if gpu_handler is None:
         raise _RouterSLMUnavailable(f"{GPU_ROUTE} not registered")
-
-    # Fresh scope — router never forwards the original caller's auth
-    # to /dev/gpu. gpu's inline POST gate will reject if no auth is
-    # present, so we stamp an internal sentinel the gpu plugin reads
-    # as 'loopback OK'. For now, just reuse scope (the router hook
-    # already passed its own AUTH="none" gate).
-    result = await gpu_handler("POST", prompt, {"_scope": scope or {}})
+    internal_scope = dict(scope or {})
+    internal_scope["_internal_caller"] = "router"
+    result = await gpu_handler("POST", prompt, {"_scope": internal_scope})
 
     if not isinstance(result, dict):
         raise _RouterSLMUnavailable(
