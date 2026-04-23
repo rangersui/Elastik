@@ -271,53 +271,92 @@ def _auth_scope_tag(scope) -> str:
 # "sales-report" is reachable by URL /home/sales-report, and a name
 # like "etc/gpu.conf" is reachable by URL /etc/gpu.conf. Read-auth
 # predicates here work on the internal form.
+#
+# Two separate blocklists apply:
+#
+# _ROUTER_BLOCKED_PREFIXES — infrastructure namespaces that are
+#   NEVER valid routing targets regardless of caller tier. T3 can
+#   still READ these worlds by direct navigation; router simply
+#   never SUGGESTS them. This covers:
+#     var/    — caches and logs (router writes its own cache here;
+#                 including it in the pool destabilises T2's cache
+#                 fingerprint since every router call births a new
+#                 var/cache/router/<hash> world)
+#     lib/    — plugin source code
+#     boot/   — startup config
+#     dev/    — device endpoints (not content worlds)
+#     dav/    — WebDAV collection (not content worlds)
+#     auth/   — auth endpoints (not content worlds)
+#     shaped/ — semantic derivatives, not sources
+#     bin/    — plugin route aliases
+#     usr/    — skills / renderers
+#
+# _T1_BLOCKED_PREFIXES — additional T1 hide-list. T1 (anonymous)
+#   also cannot see etc/* (operator config) even though higher
+#   tiers may route there.
+#
+# Codex P2: the earlier T2/T3 branch returned True blanket, which
+# pulled var/cache/router/* into T2's pool. Every router call
+# wrote a new cache world, which changed T2's world_list_fingerprint,
+# which busted T2's cache on every subsequent identical request.
+# The test suite even worked around this by using T1 for cache-hit
+# assertions. With _ROUTER_BLOCKED_PREFIXES applied globally,
+# T2 cache fingerprints stay stable and the PLAN's "readable and
+# user-facing" candidate-set promise is actually honoured.
+
+_ROUTER_BLOCKED_PREFIXES = (
+    "var/", "lib/", "boot/", "dev/", "dav/",
+    "auth/", "shaped/", "bin/", "usr/",
+)
 
 _T1_BLOCKED_PREFIXES = (
-    "etc/", "lib/", "usr/", "var/", "boot/",
-    "dev/", "dav/", "auth/", "shaped/",
+    "etc/",
 )
 
 
-def _caller_can_read(scope_tag: str, world_name: str) -> bool:
-    """Read-auth predicate that mirrors server.py's direct-navigation
-    gate. Router does not invent new ACLs.
+def _starts_with_any(name: str, prefixes) -> bool:
+    """Helper — True iff `name` equals a prefix stem or starts with
+    one of the listed prefixes."""
+    for p in prefixes:
+        if name == p.rstrip("/"):
+            return True
+        if name.startswith(p):
+            return True
+    return False
 
-    Rules (match elastik's current surface, applied to INTERNAL
-    world names as found on disk):
-      T3              — can read everything
-      T2              — can read everything T1 can + /var/*, /lib/*
-                        (T2 matches the /home write tier; for READ
-                        purposes it is equivalent to T3 in elastik's
-                        current code — but we still keep the tier
-                        tag in the cache key so behaviour upgrades
-                        later do not silently poison cache)
-      T1              — can read /home/*-backed worlds (names
-                        WITHOUT an FHS prefix, because /home/ is
-                        stripped on storage) plus explicit proc/
-                        / bin/ / mnt/. Cannot read etc/* / lib/* /
-                        usr/* / var/* / boot/* / dev/* / dav/* /
-                        auth/* / shaped/*.
-      cap:<mode>:<pfx>— can read ONLY names starting with <pfx>.
-                        Prefix applies to the internal form (so
-                        cap scoped to 'scratch/' covers /home/scratch
-                        URL-side).
+
+def _caller_can_read(scope_tag: str, world_name: str) -> bool:
+    """Router-candidacy predicate. Combines a GLOBAL infrastructure
+    filter with tier-specific read-auth.
+
+    Global filter (_ROUTER_BLOCKED_PREFIXES) applies to all tiers.
+    Worlds in var/, lib/, boot/, dev/, dav/, auth/, shaped/, bin/,
+    usr/ are never valid routing targets — they're infrastructure
+    or derivatives, not user-facing content. T2/T3 can still READ
+    them by direct navigation; router simply never surfaces them.
+
+    Tier-specific:
+      T3              — anything not in the global blocklist.
+      T2              — same as T3 (T2 == T3 for READ visibility in
+                        elastik's current auth code; we keep the
+                        tag distinct in the cache key so a future
+                        split doesn't silently poison cache).
+      T1              — as T3 minus etc/* (anonymous can't see
+                        operator config).
+      cap:<mode>:<pfx>— can read ONLY names starting with <pfx>,
+                        AND the global blocklist still applies
+                        (a cap scoped to var/cache/... cannot
+                        coerce router into using cache worlds as
+                        suggestion targets).
     """
+    # Global routing filter first — applies to every tier.
+    if _starts_with_any(world_name, _ROUTER_BLOCKED_PREFIXES):
+        return False
     if scope_tag in ("T2", "T3"):
         return True
     if scope_tag == "T1":
-        # Explicit T1-blocked prefixes first. A world whose name
-        # starts with any of these lives outside the public read
-        # surface.
-        for blocked in _T1_BLOCKED_PREFIXES:
-            if world_name == blocked.rstrip("/"):
-                return False
-            if world_name.startswith(blocked):
-                return False
-        # Everything else — including names without an FHS prefix
-        # (home/-defaulted) and explicit proc/ / bin/ / mnt/ — is
-        # T1-readable. Covers the case `conn("etc/fstab")` would
-        # store as "etc/fstab" AND the case `conn("sales-report")`
-        # would store as "sales-report" (URL /home/sales-report).
+        if _starts_with_any(world_name, _T1_BLOCKED_PREFIXES):
+            return False
         return True
     if scope_tag.startswith("cap:"):
         # "cap:<mode>:<prefix>"

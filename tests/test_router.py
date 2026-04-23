@@ -154,6 +154,11 @@ _CANNED = {
     "wal-ho":          "MATCH: hot",
     # Pool-shrink test
     "typo-home":       "MATCH: public",
+    # Probe that forces an out-of-pool discard: target a
+    # router-blocked namespace that should never be in any pool,
+    # regardless of caller tier. Used to surface pool debug
+    # headers for the Codex P2 regression test.
+    "probe-var-cache": "MATCH: var/cache/router/fake",
 }
 
 
@@ -525,6 +530,47 @@ def run():
         test("second identical (T1) -> cache hit",
              s2 == 303 and h2.get("x-semantic-route-cache") == "hit",
              f"cache={h2.get('x-semantic-route-cache')}")
+
+        # §11b. T2 cache-hit regression (Codex P2).
+        # Before the router-candidacy blocklist was added, T2's
+        # _caller_can_read returned True for everything, pulling
+        # var/cache/router/* worlds into T2's pool. Every router
+        # call wrote a new cache world, which changed T2's
+        # world_list_fingerprint, which busted the cache on every
+        # subsequent identical T2 request. Now that var/ is in
+        # _ROUTER_BLOCKED_PREFIXES globally, T2 callers see a stable
+        # pool across successive router calls -> cache hits work.
+        # Cache stability IS the proof that the blocklist took
+        # effect: if cache-writes were still polluting the pool,
+        # the second T2 call would route fresh (cache=generated).
+        _http("GET", "/not-quite-sales-t2-cachetest", token=TOKEN)
+        s, h, body = _http("GET", "/not-quite-sales-t2-cachetest",
+                           token=TOKEN)
+        test("second identical (T2) -> cache hit "
+             "(was broken when var/cache/router/* polluted the pool)",
+             s == 303 and h.get("x-semantic-route-cache") == "hit",
+             f"got {s} cache={h.get('x-semantic-route-cache')} "
+             f"body={body[:120]!r}")
+
+        # §11c. Positive pool observation: the "probe-var-cache"
+        # canned reply says MATCH: var/cache/router/fake, a world
+        # name in the globally-blocked namespace. No readable pool
+        # should contain it (for any caller tier), so router
+        # discards and the X-Router-Debug-Pool header on the 404
+        # gives us a direct view of what pool_set actually was.
+        s, h, body = _http("GET", "/probe-var-cache-typo", token=TOKEN)
+        pool_dbg = h.get("x-router-debug-pool") or ""
+        test("probe hallucination -> 404 with debug pool header",
+             s == 404 and pool_dbg,
+             f"got {s} pool={pool_dbg[:300]!r}")
+        blocked_seen = [
+            p for p in ("var/", "lib/", "boot/", "dev/", "dav/",
+                        "auth/", "shaped/", "bin/", "usr/")
+            if p in pool_dbg
+        ]
+        test("T2 pool excludes all _ROUTER_BLOCKED_PREFIXES",
+             not blocked_seen,
+             f"leaked prefixes: {blocked_seen}, pool={pool_dbg[:300]}")
 
         # ---------------------------------------------------------
         # §20. HEAD returns same headers, no body
